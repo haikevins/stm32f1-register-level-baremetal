@@ -1,4 +1,4 @@
-# STM32F103 Bare-Metal Layered Skeleton Template
+# STM32F103 Register Level Bare-Metal Template
 
 Khung project tối thiểu cho **STM32F103C8T6 / Blue Pill**, sử dụng C11 và assembly,
 không dùng HAL, LL, SPL, libopencm3, Arduino Core hoặc RTOS.
