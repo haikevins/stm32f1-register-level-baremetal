@@ -1,0 +1,6 @@
+#ifndef SERVICE_CONFIG_H
+#define SERVICE_CONFIG_H
+
+#define SERVICE_EVENT_QUEUE_CAPACITY (16U)
+
+#endif
