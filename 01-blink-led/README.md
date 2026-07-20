@@ -1,4 +1,4 @@
-# Example 01: Non-Blocking LED Blink
+# Example 01: LED Blink
 
 A register-level bare-metal example for the **STM32F103C8T6 Blue Pill**.
 
