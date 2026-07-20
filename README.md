@@ -1,4 +1,4 @@
-# STM32F103 Register-Level Bare-Metal Project Template
+# STM32F103 Register-Level Bare-Metal Template
 
 A minimal, buildable project skeleton for the **STM32F103C8T6 (Blue Pill)**, written in C11 and ARM assembly.
 
