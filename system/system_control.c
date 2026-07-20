@@ -13,6 +13,6 @@ void system_panic(void)
 
     for (;;)
     {
-        __asm volatile("nop");
+        cortex_m3_wait_for_interrupt();
     }
 }
