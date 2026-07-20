@@ -28,6 +28,11 @@ static inline void cortex_m3_instruction_sync_barrier(void)
     __asm volatile("isb" ::: "memory");
 }
 
+static inline void cortex_m3_nop(void)
+{
+    __asm volatile("nop");
+}
+
 void cortex_m3_system_reset(void);
 
 #endif
