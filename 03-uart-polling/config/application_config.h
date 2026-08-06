@@ -1,0 +1,6 @@
+#ifndef APPLICATION_CONFIG_H
+#define APPLICATION_CONFIG_H
+
+#define APPLICATION_UART_GREETING "STM32F103 UART polling ready\r\n"
+
+#endif
