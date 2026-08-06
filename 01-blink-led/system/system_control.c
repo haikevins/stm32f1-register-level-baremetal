@@ -4,7 +4,7 @@
 
 void system_idle(void)
 {
-    cortex_m3_wait_for_interrupt();
+    cortex_m3_nop();
 }
 
 void system_panic(void)
@@ -13,6 +13,6 @@ void system_panic(void)
 
     for (;;)
     {
-        cortex_m3_wait_for_interrupt();
+        cortex_m3_nop();
     }
 }
