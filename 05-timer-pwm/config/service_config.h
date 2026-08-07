@@ -1,0 +1,6 @@
+#ifndef SERVICE_CONFIG_H
+#define SERVICE_CONFIG_H
+
+#define PWM_SERVICE_DUTY_MAX_PERMILLE (1000U)
+
+#endif

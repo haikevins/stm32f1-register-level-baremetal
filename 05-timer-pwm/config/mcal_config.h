@@ -1,0 +1,6 @@
+#ifndef MCAL_CONFIG_H
+#define MCAL_CONFIG_H
+
+#define MCAL_RCC_READY_TIMEOUT_CYCLES (1000000UL)
+
+#endif
