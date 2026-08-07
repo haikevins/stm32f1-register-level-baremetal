@@ -1,0 +1,16 @@
+#ifndef APPLICATION_CONFIG_H
+#define APPLICATION_CONFIG_H
+
+#define DISPLAY_DEMO_UPDATE_PERIOD_MS (100UL)
+#define DISPLAY_DEMO_PROGRESS_STEP    (2U)
+
+#if DISPLAY_DEMO_UPDATE_PERIOD_MS == 0UL
+#error "DISPLAY_DEMO_UPDATE_PERIOD_MS must be greater than zero."
+#endif
+
+#if (DISPLAY_DEMO_PROGRESS_STEP == 0U) || \
+    (DISPLAY_DEMO_PROGRESS_STEP > 100U)
+#error "DISPLAY_DEMO_PROGRESS_STEP must be in the range 1..100."
+#endif
+
+#endif
