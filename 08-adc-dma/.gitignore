@@ -1,0 +1,24 @@
+# Build output
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.o
+*.d
+
+# IDE/editor
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debug logs
+openocd.log
+gdb.log
