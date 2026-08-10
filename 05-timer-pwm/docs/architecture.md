@@ -1,49 +1,81 @@
-# Architecture
+# Kiến trúc — 05-timer-pwm
 
-## Dependency direction
+## 1. Dependency graph
 
 ```text
-app -> services -> bsp -> mcal -> platform
+Application
+   ├─> Time Service → Board Timebase → MCAL SysTick → Cortex-M3
+   └─> PWM Service  → Board PWM      → MCAL Timer
+                                         └─> MCAL GPIO
+                                              ↓
+                                           Platform
 ```
 
-`system` is the composition root.
+## 2. Ownership
 
-## Responsibilities
+| Concern | Owner |
+|---|---|
+| Fade direction/step | Application |
+| Duty unit/clamp | PWM Service |
+| PA0/TIM2_CH1 mapping | BSP |
+| PSC/ARR/CCR/PWM mode | MCAL Timer |
+| APB timer clock | MCAL RCC |
+| 1 ms tick | MCAL SysTick |
 
-### Application
+## 3. Hardware vs software timing
 
-- Schedules duty-cycle changes every 10 ms.
-- Generates the triangular 0..1000 permille breathing waveform.
-- Exposes duty, direction and update count for debugger inspection.
+Hai time domain độc lập:
 
-### PWM service
+```text
+TIM2 = waveform generation 1 kHz
+SysTick = application update scheduler 1 kHz tick
+```
 
-- Presents a board-independent duty-cycle API in permille.
-- Clamps duty to the valid 0..1000 range.
+PWM không phụ thuộc việc Application chạy đúng từng microsecond. CPU chỉ cập nhật duty thưa hơn.
 
-### Time service
+## 4. Why permille at Service boundary
 
-- Presents the 1 ms monotonic SysTick timebase to the application.
+Service không expose raw CCR:
 
-### BSP
+- raw CCR phụ thuộc ARR,
+- Application không cần biết timer resolution,
+- 0..1000 portable hơn,
+- dễ clamp.
 
-- Maps PWM output to PA0 / TIM2_CH1.
-- Initializes the board timebase.
-- Passes the actual TIM2 clock to MCAL.
+Đây là ví dụ chuyển từ hardware unit sang semantic unit.
 
-### MCAL
+## 5. Clock ownership
 
-- Configures PA0 as alternate-function push-pull.
-- Configures TIM2 PWM mode 1 through direct register access.
-- Configures the Cortex-M3 SysTick timebase.
-- Configures the STM32 clock tree and reports the APB1 timer clock.
+Application không biết SYSCLK/PCLK1. BSP lấy actual timer clock từ RCC và truyền xuống MCAL. MCAL chỉ cần:
 
-### Platform
+```text
+timer_clock_hz
+timer_tick_hz
+pwm_frequency_hz
+```
 
-- Defines STM32F103 memory addresses, timer/RCC/GPIO register structures and
-  bit masks.
+## 6. Preload semantics
 
-## Interrupt policy
+MCAL bật `OC1PE` và `ARPE`; Service chỉ gọi set duty. Application không cần biết latch timing.
 
-Only `SysTick_Handler` is strong. TIM2 runs without interrupts, so
-`TIM2_IRQHandler` remains the weak default handler.
+## 7. ISR policy
+
+TIM2 không interrupt. SysTick ISR thuộc MCAL SysTick và chỉ tăng counter.
+
+## 8. Failure handling
+
+Nếu timer clock không chia hết timer tick hoặc tick không chia hết PWM frequency, MCAL init fail. `system_init()` propagate fail tới `system_panic()`.
+
+Điều này tránh silently tạo frequency gần đúng ngoài contract hiện tại.
+
+## 9. Extension boundary
+
+- đổi waveform policy → Application,
+- đổi unit/API → Service,
+- đổi pin/timer channel → BSP,
+- hỗ trợ timer/channel mới → MCAL/Platform,
+- đổi clock tree → RCC.
+
+## 10. Không nên làm
+
+Không ghi `TIM2->CCR1` trong Application. Làm vậy buộc behavior phụ thuộc resolution/register và phá layer boundary.

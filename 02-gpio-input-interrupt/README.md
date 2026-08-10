@@ -1,124 +1,165 @@
-# Example 02: GPIO Input Interrupt
+# 02-gpio-input-interrupt — GPIO input + EXTI + debounce ngoài ISR
 
-A register-level bare-metal example for the **STM32F103C8T6 Blue Pill**.
+Example này mở rộng nền tảng của `01-blink-led` bằng một nút nhấn ngoài tại **PA0**. PA0 dùng pull-up nội, **EXTI0** bắt falling edge khi nhấn, ISR chỉ ghi nhận event, còn **Button Service** thực hiện debounce 30 ms ở thread mode. Một press hợp lệ sẽ toggle LED onboard **PC13**.
 
-Pressing an external push button connected between **PA0 and GND** toggles the
-onboard active-low LED on **PC13**. PA0 uses the STM32 internal pull-up, EXTI0
-detects the falling edge, and a 30 ms debounce check runs outside the interrupt
-handler.
+## 1. Mục tiêu học tập
 
-No STM32 HAL, LL, SPL, libopencm3, Arduino Core, or RTOS is used.
+Example minh họa:
 
-## What This Example Demonstrates
+- GPIO input pull-up trên STM32F1,
+- mapping GPIO → EXTI qua AFIO,
+- cấu hình falling-edge trigger,
+- enable IRQ và priority trong NVIC,
+- clear EXTI pending flag đúng semantics write-one-to-clear,
+- cách ISR chuyển hardware event thành software event nhỏ gọn,
+- debounce theo timestamp thay vì delay trong ISR,
+- giữ Application không biết EXTI/GPIO register,
+- debug interrupt với ST-Link/OpenOCD.
 
-- Register-level GPIO input with an internal pull-up
-- AFIO external-interrupt line routing
-- EXTI falling-edge configuration
-- Cortex-M3 NVIC priority and interrupt enable registers
-- A minimal EXTI ISR that only acknowledges hardware and records an event
-- Thread-mode debounce using the SysTick time service
-- Strict layered architecture
-- Active-low Blue Pill LED control
-- Debug-safe `NOP` idle behavior for ST-Link probes without NRST wiring
+## 2. Wiring
 
-## Hardware
-
-Connect a normally-open push button:
+Dùng push button normally-open:
 
 ```text
 PA0 ---- push button ---- GND
 ```
 
-The internal pull-up keeps PA0 high while the button is released.
+Không cần điện trở pull-up ngoài vì firmware cấu hình pull-up nội.
 
-| Resource | Configuration |
+LED onboard:
+
+```text
+PC13 = active-low
+```
+
+Bảng tài nguyên:
+
+| Resource | Giá trị |
 |---|---|
-| Button pin | PA0 |
-| Input mode | Pull-up |
+| Button | PA0 |
+| GPIO mode | Input pull |
+| Pull | Up |
 | Active level | Low |
-| EXTI line | EXTI0 |
-| Trigger | Falling edge |
+| EXTI line | 0 |
+| Trigger | Falling |
+| IRQ priority | 2 |
 | Debounce | 30 ms |
-| LED pin | PC13 |
-| LED active level | Low |
+| LED | PC13 active-low |
+| Timebase | SysTick 1 kHz |
 
-Do not connect PA0 directly to 3.3 V and GND at the same time.
+## 3. Behavior
 
-## Execution Flow
-
-```text
-Button press
-    |
-    v
-PA0 falling edge
-    |
-    v
-EXTI0_IRQHandler
-    |
-    +--> Clear EXTI pending flag
-    +--> Set MCAL-owned event bit
-    |
-    v
-Button Service
-    |
-    +--> Wait 30 ms in thread mode
-    +--> Confirm PA0 is still low
-    |
-    v
-Application
-    |
-    v
-Indication Service
-    |
-    v
-PC13 LED toggle
-```
-
-The interrupt handler does not debounce, toggle the LED, call a service, or
-block.
-
-## Layered Path
-
-Button input:
+Khi thả nút:
 
 ```text
-Application
-    |
-    v
-Button Service
-    |
-    v
-Board Button
-    |
-    v
-MCAL GPIO + EXTI
-    |
-    v
-GPIOA / AFIO / EXTI / NVIC registers
+PA0 = HIGH
 ```
 
-LED output:
+Khi nhấn:
 
 ```text
-Application
-    |
-    v
-Indication Service
-    |
-    v
-Board LED
-    |
-    v
-MCAL GPIO
-    |
-    v
-GPIOC registers
+PA0: HIGH → LOW
+        ↓
+      EXTI0
 ```
 
-## Interrupt Ownership
+Sau một press hợp lệ:
 
-The EXTI handler belongs to `mcal/src/mcal_exti.c`, the lowest module that owns
-the peripheral:
+```text
+LED OFF → ON
+LED ON  → OFF
+```
+
+Bounce điện cơ không được xử lý trong ISR. Mỗi falling edge mới chỉ đánh dấu/restart cửa sổ debounce; sau 30 ms Service đọc lại PA0.
+
+## 4. Config
+
+`config/service_config.h`:
+
+```c
+#define SERVICE_EVENT_QUEUE_CAPACITY    (16U)
+#define BUTTON_SERVICE_DEBOUNCE_TIME_MS (30UL)
+```
+
+`bsp/bluepill/include/board_pins.h`:
+
+```c
+#define BOARD_USER_BUTTON_PORT         MCAL_GPIO_PORT_A
+#define BOARD_USER_BUTTON_PIN          (0U)
+#define BOARD_USER_BUTTON_ACTIVE_LEVEL MCAL_GPIO_LEVEL_LOW
+#define BOARD_USER_BUTTON_EXTI_LINE    (0U)
+#define BOARD_USER_BUTTON_IRQ_PRIORITY (2U)
+```
+
+Clock/timebase:
+
+```c
+#define BOARD_HSE_FREQUENCY_HZ (8000000UL)
+#define BOARD_TARGET_CLOCK_HZ   (72000000UL)
+#define BOARD_TIMEBASE_HZ       (1000UL)
+```
+
+## 5. Initialization flow
+
+```text
+system_init()
+  ├─ board_init()
+  │   ├─ clock setup
+  │   ├─ board_led_init()
+  │   ├─ board_timebase_init()
+  │   └─ board_button_init()
+  │       ├─ PA0 input pull-up
+  │       └─ EXTI0 falling + NVIC
+  ├─ time_service_init()
+  ├─ indication_service_init()
+  ├─ button_service_init()
+  │   └─ discard stale latched EXTI event
+  ├─ event_service_init()
+  └─ application_init()
+```
+
+Global IRQ chỉ được enable sau khi `system_init()` hoàn tất.
+
+## 6. Register-level GPIO input pull-up
+
+Trên STM32F1, input pull-up/pull-down dùng:
+
+```text
+GPIOx_CRL/CRH: CNF = input pull
+GPIOx_ODR bit: 1 = pull-up, 0 = pull-down
+```
+
+BSP gọi:
+
+```c
+mcal_gpio_configure(
+    PA0,
+    INPUT_PULL,
+    HIGH);
+```
+
+MCAL xử lý GPIO port clock và register field tương ứng.
+
+## 7. AFIO + EXTI setup
+
+MCAL thực hiện logic tương đương:
+
+```text
+RCC_APB2ENR.AFIOEN = 1
+AFIO_EXTICR1.EXTI0 = Port A
+EXTI_IMR.MR0 = 0 trong khi cấu hình
+EXTI_RTSR.TR0 = 0
+EXTI_FTSR.TR0 = 1
+EXTI_PR.PR0 = 1 để clear pending cũ
+NVIC priority cho EXTI0
+NVIC clear pending
+NVIC enable EXTI0
+EXTI_IMR.MR0 = 1
+```
+
+## 8. ISR ownership
+
+`EXTI0_IRQHandler()` nằm trong MCAL EXTI:
 
 ```c
 void EXTI0_IRQHandler(void)
@@ -127,55 +168,133 @@ void EXTI0_IRQHandler(void)
 }
 ```
 
-`record_pending_lines()` clears the write-one-to-clear EXTI pending flag and
-sets a bit in an MCAL-owned static event mask. The upper layers poll that event
-during normal thread-mode execution.
+Handler chung:
 
-## Debounce
+1. đọc `EXTI->PR`,
+2. mask line được quan tâm,
+3. ghi lại bit pending vào `EXTI->PR` để clear,
+4. OR bit vào `g_exti_events`.
 
-The first falling edge starts or restarts a 30 ms debounce interval. When the
-interval expires, the button service reads PA0 again:
+ISR không:
 
-```c
-if (time_service_elapsed_ms(g_debounce_started_ms) <
-    BUTTON_SERVICE_DEBOUNCE_TIME_MS)
-{
-    return false;
-}
+- đọc time,
+- debounce,
+- toggle LED,
+- gọi Application,
+- delay,
+- allocate.
 
-g_debounce_pending = false;
-return board_button_is_pressed();
-```
+## 9. Event handoff từ ISR sang thread mode
 
-A press is delivered to the application only when PA0 remains low after the
-debounce interval.
-
-Configure the interval in:
+BSP:
 
 ```text
-config/service_config.h
+board_button_take_press_event()
+    ↓
+mcal_exti_take_event(0)
 ```
 
-```c
-#define BUTTON_SERVICE_DEBOUNCE_TIME_MS (30UL)
+`mcal_exti_take_event()` dùng critical section ngắn để đọc-clear `g_exti_events` an toàn so với ISR.
+
+Đây là pattern "record in ISR, consume in thread mode".
+
+## 10. Debounce algorithm
+
+State của Button Service:
+
+```text
+g_debounce_pending
+g_debounce_started_ms
 ```
 
-## Idle Behavior
+Flow:
 
-This example intentionally uses:
+```text
+EXTI event?
+  ├─ yes → debounce_pending = true
+  │        debounce_started = now
+  └─ no
 
-```c
-void system_idle(void)
-{
-    cortex_m3_nop();
-}
+debounce_pending?
+  ├─ no → no press
+  └─ yes
+       ↓
+elapsed < 30 ms?
+  ├─ yes → no press
+  └─ no
+       ↓
+read PA0 again
+  ├─ LOW → valid press
+  └─ HIGH → bounce/noise, discard
 ```
 
-instead of `WFI`. This keeps the MCU in Run mode and makes repeated SWD
-attachment more reliable when the ST-Link wiring does not include the target
-NRST pin. EXTI and SysTick still operate normally.
+Nếu bounce tạo falling edge mới, timestamp được restart.
 
-## Build
+## 11. Application
+
+Application rất nhỏ:
+
+```text
+button_service_take_press()
+    ↓ true
+indication_service_toggle()
+```
+
+Không có pin number, EXTI line hoặc debounce constant trong Application.
+
+## 12. Kiến trúc
+
+```text
+PA0
+ ↓
+MCAL GPIO + EXTI
+ ↓
+Board Button
+ ↓
+Button Service
+ ↓
+Application
+ ↓
+Indication Service
+ ↓
+Board LED
+ ↓
+MCAL GPIO
+ ↓
+PC13
+```
+
+Time path:
+
+```text
+SysTick ISR → Time Service → Button Service
+```
+
+## 13. Event Service
+
+Example vẫn init generic Event Service/static queue, nhưng button path hiện tại dùng MCAL event bit trực tiếp qua Board Button và không publish `service_event_t`. Đây là module scaffold còn lại để mở rộng event-driven design.
+
+## 14. Idle behavior
+
+`system_idle()` dùng `NOP`, không `WFI`. EXTI và SysTick vẫn chạy vì global interrupt đã enable. CPU không vào sleep, thuận tiện cho SWD attach với setup không có NRST.
+
+
+## Build, flash và debug
+
+Yêu cầu công cụ:
+
+```text
+arm-none-eabi-gcc
+arm-none-eabi-objcopy
+arm-none-eabi-objdump
+arm-none-eabi-size
+GNU Make
+Python 3
+OpenOCD
+arm-none-eabi-gdb hoặc gdb-multiarch
+```
+
+Build:
 
 ```bash
 make check-layers
@@ -183,7 +302,7 @@ make clean
 make
 ```
 
-Generated files:
+Các artifact chính:
 
 ```text
 build/firmware.elf
@@ -193,70 +312,91 @@ build/firmware.map
 build/firmware.lst
 ```
 
-## Flash
+Flash:
 
 ```bash
 make flash
 ```
 
-## Debug
-
-Terminal 1:
+Debug bằng hai terminal:
 
 ```bash
+# Terminal 1
 make debug-server
-```
 
-Terminal 2:
-
-```bash
+# Terminal 2
 make debug
 ```
 
-Useful GDB commands:
+OpenOCD config dùng SWD, `reset_config none` và adapter speed 1000 kHz.
+
+
+Breakpoint hữu ích:
 
 ```gdb
 break EXTI0_IRQHandler
 continue
 ```
 
-After the ISR breakpoint is hit:
+Sau khi hit, tiếp tục chạy để Button Service hoàn tất debounce:
 
 ```gdb
-bt
 continue
 ```
 
-## Project Structure
+Có thể đặt thêm breakpoint:
 
-```text
-app/                         Toggle behavior
-services/                    Button debounce, time, indication, events
-bsp/bluepill/                PA0 button and PC13 LED mapping
-mcal/                        GPIO, EXTI, RCC, SysTick
-platform/arch/cortex-m3/     SysTick, NVIC and core registers
-platform/device/stm32f103xb/ AFIO, EXTI, GPIO and RCC register maps
-system/                      Composition root and super-loop
-startup/                     Reset handler and vector table
-config/                      Compile-time settings
-tools/                       Build, flash, debug and layer checks
+```gdb
+break button_service_take_press
 ```
 
-## Important Register Configuration
 
-The project performs the equivalent register-level setup:
+## 15. Test từng bước
 
-```text
-RCC_APB2ENR.AFIOEN = 1
-RCC_APB2ENR.IOPAEN = 1
-GPIOA_CRL.CNF0/MODE0 = input pull-up
-GPIOA_ODR.ODR0 = 1
-AFIO_EXTICR1.EXTI0 = PA0
-EXTI_FTSR.TR0 = 1
-EXTI_IMR.MR0 = 1
-NVIC_ISER.EXTI0 = 1
-```
+1. Flash firmware khi nút chưa nhấn.
+2. LED phải ở trạng thái OFF ban đầu.
+3. Nhấn-thả một lần: LED đổi trạng thái đúng một lần.
+4. Nhấn nhiều lần chậm: mỗi press toggle một lần.
+5. Giữ nút: không tự lặp toggle vì chỉ falling edge khởi tạo press.
+6. Thả nút: rising edge không được cấu hình nên không tạo press.
+7. Bấm rất nhanh/bounce: debounce phải loại phần lớn chuyển đổi giả.
 
-## License
+## 16. Troubleshooting
 
-This example is licensed under the MIT License.
+### Nhấn không có phản ứng
+
+Kiểm tra:
+
+- button thật sự nối PA0-GND,
+- PA0 không bị peripheral khác chiếm,
+- `EXTI0_IRQHandler` là strong symbol,
+- `AFIO_EXTICR1` route về Port A,
+- EXTI mask/FTSR đúng,
+- NVIC IRQ 6 được enable.
+
+### LED toggle nhiều lần một press
+
+Kiểm tra:
+
+- `BUTTON_SERVICE_DEBOUNCE_TIME_MS`,
+- wiring dài/nhiễu,
+- button contact bounce mạnh,
+- application có gọi `button_service_take_press()` nhiều nơi không.
+
+### EXTI ISR hit nhưng LED không đổi
+
+Đặt breakpoint tại Button Service và xem PA0 sau 30 ms. Nếu pin đã HIGH, event bị loại đúng vì không còn là press ổn định.
+
+## 17. Bài tập mở rộng
+
+- tạo short/long press,
+- thêm release event bằng rising edge,
+- thêm double-click state machine,
+- đổi button sang PBx/PCx và EXTI line tương ứng,
+- publish button event qua Event Service queue,
+- thêm nhiều button trên EXTI9_5 hoặc EXTI15_10.
+
+## 18. Tài liệu liên quan
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/porting_guide.md`](docs/porting_guide.md)
