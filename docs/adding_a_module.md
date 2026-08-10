@@ -398,22 +398,22 @@ Bring up in layers:
 
 ## 31. Module Addition Checklist
 
-- [ ] requirement defined;
-- [ ] correct layer chosen;
-- [ ] base/register/bit definitions added;
-- [ ] MCAL API generic;
-- [ ] RCC/GPIO setup correct;
-- [ ] polling bounded;
-- [ ] ISR ownership correct;
-- [ ] NVIC configured through proper layer;
-- [ ] BSP mapping added;
-- [ ] ECUAL transport clean;
-- [ ] Service hardware-independent;
-- [ ] Application contains no low-level include;
-- [ ] IRQ lifecycle considered;
-- [ ] compile-time validation added;
-- [ ] debug observability added;
-- [ ] docs updated;
-- [ ] layer checker passes;
-- [ ] clean build passes;
-- [ ] hardware test passes.
+-  requirement defined;
+-  correct layer chosen;
+-  base/register/bit definitions added;
+-  MCAL API generic;
+-  RCC/GPIO setup correct;
+-  polling bounded;
+-  ISR ownership correct;
+-  NVIC configured through proper layer;
+-  BSP mapping added;
+-  ECUAL transport clean;
+-  Service hardware-independent;
+-  Application contains no low-level include;
+-  IRQ lifecycle considered;
+-  compile-time validation added;
+-  debug observability added;
+-  docs updated;
+-  layer checker passes;
+-  clean build passes;
+-  hardware test passes.

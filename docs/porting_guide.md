@@ -272,15 +272,15 @@ make size
 
 ## 20. Port Acceptance Checklist
 
-- [ ] linker matches memory;
-- [ ] startup matches device;
-- [ ] clock tree verified;
-- [ ] register map verified;
-- [ ] BSP pins verified;
-- [ ] MCAL peripheral verified;
-- [ ] IRQ numbers/handlers verified;
-- [ ] DMA mapping verified if used;
-- [ ] OpenOCD connects;
-- [ ] layer checker passes;
-- [ ] clean build passes;
-- [ ] hardware behavior matches the original logical contract.
+-  linker matches memory;
+-  startup matches device;
+-  clock tree verified;
+-  register map verified;
+-  BSP pins verified;
+-  MCAL peripheral verified;
+-  IRQ numbers/handlers verified;
+-  DMA mapping verified if used;
+-  OpenOCD connects;
+-  layer checker passes;
+-  clean build passes;
+-  hardware behavior matches the original logical contract.

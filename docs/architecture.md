@@ -385,16 +385,16 @@ Architecture review and hardware testing are still required.
 
 ## 24. Architectural Acceptance Checklist
 
-- [ ] Application has no low-level includes.
-- [ ] Services contain no register access.
-- [ ] BSP owns board mapping.
-- [ ] ECUAL owns external-device protocol.
-- [ ] MCAL owns generic peripheral behavior.
-- [ ] Platform owns register/core definitions.
-- [ ] ISR belongs to the lowest owner.
-- [ ] ISR work is bounded.
-- [ ] thread handoff is explicit.
-- [ ] shared state ownership is clear.
-- [ ] clocks are translated below Application.
-- [ ] errors are observable.
-- [ ] `make check-layers` passes.
+-  Application has no low-level includes.
+-  Services contain no register access.
+-  BSP owns board mapping.
+-  ECUAL owns external-device protocol.
+-  MCAL owns generic peripheral behavior.
+-  Platform owns register/core definitions.
+-  ISR belongs to the lowest owner.
+-  ISR work is bounded.
+-  thread handoff is explicit.
+-  shared state ownership is clear.
+-  clocks are translated below Application.
+-  errors are observable.
+-  `make check-layers` passes.
