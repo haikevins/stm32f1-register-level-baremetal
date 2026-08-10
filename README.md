@@ -419,42 +419,42 @@ Recommended order:
 
 ### Architecture
 
-- [ ] Application has no BSP/MCAL/Platform includes.
-- [ ] Services contain no register accesses.
-- [ ] BSP owns physical board mapping.
-- [ ] ECUAL owns external-device protocol.
-- [ ] ISR ownership is explicit.
+- Application has no BSP/MCAL/Platform includes.
+- Services contain no register accesses.
+- BSP owns physical board mapping.
+- ECUAL owns external-device protocol.
+- ISR ownership is explicit.
 
 ### Runtime
 
-- [ ] `.data` initializes correctly.
-- [ ] `.bss` is zeroed.
-- [ ] global IRQ lifecycle is intentional.
-- [ ] `system_init()` orders dependencies correctly.
-- [ ] `application_process()` is bounded.
-- [ ] panic behavior is intentional.
+- `.data` initializes correctly.
+- `.bss` is zeroed.
+- global IRQ lifecycle is intentional.
+- `system_init()` orders dependencies correctly.
+- `application_process()` is bounded.
+- panic behavior is intentional.
 
 ### Peripheral
 
-- [ ] base address/register struct/bit masks are correct.
-- [ ] peripheral clock/reset logic is correct.
-- [ ] GPIO mode is correct.
-- [ ] bus/timer clock math is correct.
-- [ ] errors/timeouts/overflow are defined.
+- base address/register struct/bit masks are correct.
+- peripheral clock/reset logic is correct.
+- GPIO mode is correct.
+- bus/timer clock math is correct.
+- errors/timeouts/overflow are defined.
 
 ### Tooling
 
-- [ ] `make check-layers` passes.
-- [ ] clean build passes.
-- [ ] map/size are reasonable.
-- [ ] OpenOCD connects.
-- [ ] GDB symbols are usable.
+- `make check-layers` passes.
+- clean build passes.
+- map/size are reasonable.
+- OpenOCD connects.
+- GDB symbols are usable.
 
 ### Docs
 
-- [ ] README explains wiring and behavior.
-- [ ] architecture document explains ownership.
-- [ ] porting guide explains clock/pin/IRQ changes.
+- README explains wiring and behavior.
+- architecture document explains ownership.
+- porting guide explains clock/pin/IRQ changes.
 
 ## 23. Documentation
 
