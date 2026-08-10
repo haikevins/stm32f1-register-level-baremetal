@@ -67,13 +67,13 @@ Replace MCAL/Platform Device and board pin mapping.
 
 ## 8. Post-Port Test
 
-- [ ] TX baud correct;
-- [ ] greeting readable;
-- [ ] RX works;
-- [ ] echo works;
-- [ ] HSE and fallback clock both calculate a valid baud if fallback is kept;
-- [ ] no unbounded wait;
-- [ ] layer checker passes.
+-  TX baud correct;
+-  greeting readable;
+-  RX works;
+-  echo works;
+-  HSE and fallback clock both calculate a valid baud if fallback is kept;
+-  no unbounded wait;
+-  layer checker passes.
 
 ## 9. Common Pitfalls
 

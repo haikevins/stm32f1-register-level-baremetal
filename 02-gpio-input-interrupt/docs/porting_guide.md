@@ -67,13 +67,13 @@ Replace BSP/MCAL/Platform implementation.
 
 ## 8. Verification Checklist
 
-- [ ] idle input level stable;
-- [ ] correct edge produces interrupt;
-- [ ] pending flag clears;
-- [ ] raw edge reaches Button Service;
-- [ ] 30 ms debounce works;
-- [ ] one press creates one logical event;
-- [ ] LED toggles through Indication Service.
+-  idle input level stable;
+-  correct edge produces interrupt;
+-  pending flag clears;
+-  raw edge reaches Button Service;
+-  30 ms debounce works;
+-  one press creates one logical event;
+-  LED toggles through Indication Service.
 
 ## 9. GDB Checklist
 

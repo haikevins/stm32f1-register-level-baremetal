@@ -65,13 +65,13 @@ Replace BSP, MCAL I2C/GPIO, and Platform Device.
 
 ## 9. Verification Checklist
 
-- [ ] SDA/SCL idle HIGH;
-- [ ] correct address;
-- [ ] SCL frequency valid;
-- [ ] START/address ACK/data/STOP correct;
-- [ ] display initialization succeeds;
-- [ ] framebuffer update succeeds;
-- [ ] error counter remains zero.
+-  SDA/SCL idle HIGH;
+-  correct address;
+-  SCL frequency valid;
+-  START/address ACK/data/STOP correct;
+-  display initialization succeeds;
+-  framebuffer update succeeds;
+-  error counter remains zero.
 
 ## 10. Logic Analyzer Checklist
 

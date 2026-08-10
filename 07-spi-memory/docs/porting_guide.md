@@ -97,16 +97,16 @@ Replace BSP, MCAL SPI/GPIO, and Platform Device.
 
 ## 10. Validation Checklist
 
-- [ ] CS idle HIGH;
-- [ ] no CS glitch during GPIO initialization;
-- [ ] SPI mode 0;
-- [ ] SCK within configured maximum;
-- [ ] JEDEC ID correct;
-- [ ] WEL sets;
-- [ ] BUSY clears;
-- [ ] erase/program/read pass;
-- [ ] destructive sector is correct;
-- [ ] layer checker passes.
+-  CS idle HIGH;
+-  no CS glitch during GPIO initialization;
+-  SPI mode 0;
+-  SCK within configured maximum;
+-  JEDEC ID correct;
+-  WEL sets;
+-  BUSY clears;
+-  erase/program/read pass;
+-  destructive sector is correct;
+-  layer checker passes.
 
 ## 11. Common Pitfalls
 

@@ -74,14 +74,14 @@ Platform Architecture may remain partly reusable for another Cortex-M.
 
 ## 9. Validation Checklist
 
-- [ ] reset reaches `main`;
-- [ ] RCC reports expected clock;
-- [ ] fallback still works if intended;
-- [ ] SysTick runs at 1 kHz;
-- [ ] PC13 logical OFF is correct;
-- [ ] LED toggles every 500 ms;
-- [ ] layer checker passes;
-- [ ] debugger attaches reliably.
+-  reset reaches `main`;
+-  RCC reports expected clock;
+-  fallback still works if intended;
+-  SysTick runs at 1 kHz;
+-  PC13 logical OFF is correct;
+-  LED toggles every 500 ms;
+-  layer checker passes;
+-  debugger attaches reliably.
 
 ## 10. Common Mistakes
 

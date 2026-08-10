@@ -91,17 +91,17 @@ block cadence ~= 32 ms
 
 ## 12. Validation Checklist
 
-- [ ] pin/channel mapping correct;
-- [ ] ADC clock within limit;
-- [ ] calibration completes;
-- [ ] TIM3 trigger rate correct;
-- [ ] DMA1 CH1 active;
-- [ ] HT/TC events alternate;
-- [ ] sequence increments;
-- [ ] error count zero;
-- [ ] overrun zero at normal load;
-- [ ] raw values follow voltage;
-- [ ] hysteresis works.
+-  pin/channel mapping correct;
+-  ADC clock within limit;
+-  calibration completes;
+-  TIM3 trigger rate correct;
+-  DMA1 CH1 active;
+-  HT/TC events alternate;
+-  sequence increments;
+-  error count zero;
+-  overrun zero at normal load;
+-  raw values follow voltage;
+-  hysteresis works.
 
 ## 13. Common Pitfalls
 

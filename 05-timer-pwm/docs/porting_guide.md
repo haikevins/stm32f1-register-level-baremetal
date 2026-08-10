@@ -74,13 +74,13 @@ Re-check the timer-clock rule because another family may differ from STM32F1.
 
 ## 8. Validation Checklist
 
-- [ ] timer clock derived correctly;
-- [ ] carrier frequency correct;
-- [ ] 0% and 100% correct;
-- [ ] duty updates smoothly;
-- [ ] preload works;
-- [ ] no unnecessary timer interrupt;
-- [ ] HSI fallback still produces correct frequency if retained.
+-  timer clock derived correctly;
+-  carrier frequency correct;
+-  0% and 100% correct;
+-  duty updates smoothly;
+-  preload works;
+-  no unnecessary timer interrupt;
+-  HSI fallback still produces correct frequency if retained.
 
 ## 9. Common Pitfalls
 
