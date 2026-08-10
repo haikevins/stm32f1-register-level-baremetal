@@ -1,554 +1,419 @@
-# Hướng dẫn thêm module mới
+# Adding a New Module
 
-Tài liệu này mô tả quy trình thêm peripheral, board resource, external device, Service hoặc Application feature mà không phá architecture.
+## 1. Start from the Requirement, Not from a Register
 
-## 1. Bắt đầu từ requirement, không bắt đầu từ register
+Describe the desired behavior first.
 
-Trước khi tạo file, viết ngắn:
-
-```text
-Application cần capability gì?
-API semantic nào hợp lý?
-Hardware resource nào thực hiện capability?
-Interrupt/polling/DMA?
-Timing/error constraints?
-```
-
-Ví dụ requirement:
+Examples:
 
 ```text
-Application cần gửi/nhận byte console non-blocking.
+"Application needs a debounced button event."
+"Application needs a 1 kHz PWM output."
+"Application needs to store data in external NOR flash."
 ```
 
-Không nên bắt đầu bằng:
+Then decide which layers are required.
 
-```text
-Tạo usart1.c rồi Application gọi register.
-```
+## 2. Decide Which Layer Owns the Module
 
-## 2. Quyết định module nằm tầng nào
-
-| Câu hỏi | Tầng |
+| Responsibility | Layer |
 |---|---|
-| Product quyết định gì? | Application |
-| Semantic/domain behavior? | Service |
-| Pin/resource của board? | BSP |
-| Protocol external IC? | ECUAL |
-| STM32 peripheral register? | MCAL |
-| Address/bit/IRQ layout? | Platform |
+| product policy | Application |
+| logical capability | Service |
+| board mapping | BSP |
+| external-device protocol | ECUAL |
+| MCU peripheral implementation | MCAL |
+| STM32 register definitions | Platform Device |
+| Cortex-M core support | Platform Architecture |
+| generic utility | Common |
+| initialization order | System |
 
-Một feature thường cần nhiều module nhỏ ở nhiều tầng.
+## 3. Add the MCAL Peripheral
 
-## 3. Thêm MCAL peripheral
+Define a generic MCAL API before writing board-specific code.
 
-Tạo:
+### Public MCAL APIs Should Accept Generic Inputs
 
-```text
-mcal/include/mcal_<peripheral>.h
-mcal/src/mcal_<peripheral>.c
-```
-
-Ví dụ:
-
-```text
-mcal/include/mcal_spi.h
-mcal/src/mcal_spi.c
-```
-
-### Public MCAL API nên nhận generic input
-
-Ví dụ tốt:
+Prefer:
 
 ```c
-bool mcal_spi_init(instance,
-                   peripheral_clock_hz,
-                   max_bus_hz,
-                   mode);
+bool mcal_timer_init(uint32_t timer_clock_hz,
+                     uint32_t target_tick_hz);
 ```
 
-Thay vì:
+rather than:
 
 ```c
-void init_spi1_for_w25q64(void);
+bool timer_for_bluepill_led_init(void);
 ```
 
-Tên thứ hai trộn MCU peripheral với external device/product.
+Board meaning belongs in BSP.
 
-## 4. Thêm base address
+## 4. Add the Base Address
 
-Trong:
+If the peripheral is not yet modeled, add its base address in Platform Device.
 
-```text
-platform/device/stm32f103xb/include/stm32f103xb_memory.h
-```
+Use the STM32F103 memory map.
 
-thêm base theo device reference manual.
+Do not scatter numeric addresses through MCAL source.
 
-Ví dụ concept:
+## 5. Add the Register Structure
 
-```c
-#define STM32_SPI1_BASE (...)
-```
+Define the register block layout with the correct:
 
-Giữ address arithmetic ở device layer.
+- order;
+- offsets;
+- `volatile`;
+- read-only/read-write qualifiers.
 
-## 5. Thêm register struct
+Check reserved gaps carefully.
 
-Trong device header:
+## 6. Add Bit Definitions
 
-```c
-typedef struct
-{
-    volatile uint32_t CR1;
-    ...
-} stm32_spi_registers_t;
-```
+Add named masks/shifts for every register field used by MCAL.
 
-Cần:
+Avoid unexplained hexadecimal literals in MCAL logic.
 
-- đúng register order,
-- đúng offset/reserved slot,
-- `volatile`,
-- `const volatile` cho read-only register nếu design dùng.
+## 7. Add RCC Clock/Reset Support
 
-Nếu module critical, thêm `_Static_assert(offsetof(...))`.
+A peripheral normally needs:
 
-## 6. Thêm bit definitions
+- clock enable;
+- optional peripheral reset;
+- correct bus source.
 
-Trong:
+Keep RCC manipulation inside MCAL.
 
-```text
-stm32f103xb_register_bits.h
-```
+## 8. Add GPIO Alternate-Function Support
 
-chỉ thêm bit cần dùng.
+Verify each pin mode:
 
-Group theo register:
+- output push-pull;
+- alternate-function push-pull;
+- alternate-function open-drain;
+- floating input;
+- pull-up/pull-down;
+- analog.
 
-```c
-/* SPI_CR1 */
-#define ...
-```
+Do not assume one peripheral's mode applies to another.
 
-Tránh magic number trong MCAL.
+## 9. Design Polling
 
-## 7. Thêm RCC clock/reset support
+Polling must be:
 
-Peripheral thường cần:
+- immediate/non-blocking, or
+- bounded by a timeout/poll count.
 
-- AHB/APB clock enable,
-- đôi khi reset bit,
-- actual peripheral clock.
+Do not introduce an infinite hardware wait.
 
-Xác định bus:
+## 10. Design Interrupt Handoff
 
-```text
-APB1
-APB2
-AHB
-```
+### Event Bit
 
-Timer cần chú ý timer input clock có thể khác PCLK khi APB prescaler != 1.
+Useful for a single edge.
 
-## 8. Thêm GPIO alternate-function
+### Ring Buffer
 
-Nếu peripheral có pin:
+Useful for byte streams.
 
-- mapping pin thuộc BSP,
-- mode register call thuộc BSP qua MCAL GPIO,
-- AFIO remap nếu cần phải có owner rõ.
+### Block Event
 
-Không hard-code PAx trong MCAL generic nếu module hỗ trợ nhiều instance/board.
+Useful for DMA/sample blocks.
 
-## 9. Thiết kế polling
-
-Nếu polling status flag:
-
-```text
-wait flag
-```
-
-phải có bound hoặc timeout nếu hardware có khả năng không trả trạng thái.
-
-Tránh:
-
-```c
-while ((SR & FLAG) == 0U)
-{
-}
-```
-
-không giới hạn, trừ khi contract thật sự chấp nhận hard hang và đã document.
-
-## 10. Thiết kế interrupt
-
-Trước khi code ISR, xác định:
-
-```text
-peripheral IRQ source
-pending clear sequence
-data cần capture
-shared state
-consumer thread mode
-overflow policy
-```
-
-ISR nên nhỏ.
-
-### Event bit
-
-Dùng cho edge semantic.
-
-### Ring buffer
-
-Dùng cho stream.
-
-### Block event
-
-Dùng cho DMA.
+The ISR publishes low-level state and returns.
 
 ## 11. NVIC
 
-Nếu thêm IRQ:
+Add/extend MCAL NVIC support rather than configuring NVIC directly from
+Application/BSP when a reusable mapping is appropriate.
 
-- IRQ number vào device header nếu chưa có,
-- priority range,
-- clear pending trước enable nếu cần,
-- enable source peripheral trước/sau NVIC theo sequence an toàn,
-- global IRQ chỉ mở sau init theo template lifecycle.
+Configure:
 
-## 12. Strong handler name
+- IRQ number;
+- priority;
+- pending clear;
+- enable/disable.
 
-Tên phải khớp vector table:
+## 12. Strong Handler Name
+
+The handler must exactly match startup.
+
+Examples:
 
 ```c
-void USART1_IRQHandler(void)
+void EXTI0_IRQHandler(void);
+void USART1_IRQHandler(void);
+void DMA1_Channel1_IRQHandler(void);
 ```
 
-Sau build kiểm tra:
+## 13. Add a Board Resource
 
-```bash
-arm-none-eabi-nm build/firmware.elf | grep USART1_IRQHandler
-```
+BSP maps the generic MCAL peripheral to the physical board resource.
 
-Interrupt được implement phải là strong symbol, không còn weak alias.
-
-## 13. Thêm Board resource
-
-Tạo:
+Examples:
 
 ```text
-bsp/bluepill/include/board_<resource>.h
-bsp/bluepill/src/board_<resource>.c
+STATUS_LED -> PC13
+DISPLAY_I2C -> I2C1 PB6/PB7
+MEMORY_SPI -> SPI1 PA4..PA7
 ```
-
-Ví dụ:
-
-```text
-board_uart
-board_led
-board_memory_bus
-```
-
-BSP chịu trách nhiệm:
-
-- pin,
-- polarity,
-- peripheral instance,
-- board clock resource,
-- chip select,
-- wiring-specific behavior.
 
 ## 14. `board_pins.h`
 
-Dùng macro semantic:
+Keep physical pin definitions in BSP.
 
-```c
-BOARD_UART_TX_PIN
-BOARD_MEMORY_CS_PIN
-BOARD_STATUS_LED_PIN
-```
+Application and Services should never contain pin numbers.
 
-Không dùng generic:
+## 15. Add an External-Device ECUAL
 
-```c
-PIN1
-PIN2
-```
+If the new hardware is off-chip, create an ECUAL driver for:
 
-vì mất meaning.
+- command set;
+- register map;
+- device geometry;
+- protocol state.
 
-## 15. Thêm external device ECUAL
+## 16. Transport Callback for ECUAL
 
-Tạo:
+Prefer a transport object/function pointers:
 
 ```text
-ecual/include/<device>.h
-ecual/src/<device>.c
+write
+transfer
+select/deselect
+delay
 ```
 
-Driver chứa:
+This allows the ECUAL driver to remain independent from BSP/MCAL.
 
-- command/register map,
-- geometry,
-- protocol sequence,
-- validation.
+## 17. Add a Service
 
-Không chứa:
+Create a Service when Application should consume a logical capability rather
+than a specific device.
 
-- product threshold,
-- UI logic,
-- board pin.
+Examples:
 
-## 16. Transport callback cho ECUAL
+```text
+SSD1306 -> Display Service
+W25Q64 -> Memory Service
+raw ADC block -> ADC Service
+```
 
-Nếu layer rule không cho ECUAL include BSP, tạo transport interface:
+## 18. Service Processing Pattern
+
+Keep Service processing bounded.
+
+Typical:
 
 ```c
-typedef struct
+void service_process(void)
 {
-    bool (*transfer)(...);
-    void (*select)(void);
-    void (*deselect)(void);
-} device_transport_t;
+    if (!work_pending())
+    {
+        return;
+    }
+
+    /* bounded processing */
+}
 ```
 
-Service compose BSP callbacks rồi truyền vào ECUAL init.
+## 19. Add Application Behavior
 
-Điều này giúp unit test ECUAL sau này dễ hơn.
+Application should express policy only.
 
-## 17. Thêm Service
-
-Tạo:
+Good:
 
 ```text
-services/include/<name>_service.h
-services/src/<name>_service.c
+if measurement >= threshold -> indicator on
 ```
 
-Service API nên dùng unit semantic:
+Bad:
 
 ```text
-millivolts
-permille
-bytes
-milliseconds
-logical indication
+if ADC1->DR > 2000 -> GPIOC->BRR = ...
 ```
-
-thay vì raw register values nếu không cần.
-
-## 18. Service processing pattern
-
-Nếu data từ ISR/DMA:
-
-```c
-void service_process(void);
-bool service_take_result(...);
-```
-
-`service_process()` chạy thread mode và thực hiện computation nặng.
-
-Application gọi trong super-loop.
-
-## 19. Thêm Application behavior
-
-Application chỉ include Services/Common/Config.
-
-State machine phải:
-
-- non-blocking khi practical,
-- explicit state,
-- bounded work mỗi iteration,
-- không delay busy dài,
-- không truy cập register.
 
 ## 20. Update `system_init()`
 
-Thứ tự chuẩn:
+Initialize from bottom to top.
+
+Typical:
 
 ```text
-board init
-↓
-service init
-↓
-external device/service init phụ thuộc board
-↓
-application init
+board_init()
+service_init()
+external_device_init()
+application_init()
 ```
 
-Chỉ composition root biết toàn bộ dependency.
+Return `false` if a required component fails.
 
-## 21. Global IRQ lifecycle
+## 21. Global IRQ Lifecycle
 
-Template:
+Remember that the standard examples disable global interrupts before
+`system_init()`.
+
+Therefore:
+
+- SysTick IRQ does not advance during early initialization;
+- interrupt-driven waits cannot be used in that phase;
+- busy settling delays used before IRQ enable must be independent from SysTick.
+
+This is especially important for external-device power-on delays.
+
+## 22. Add Configuration
+
+Put tunable values in `config/`.
+
+Examples:
 
 ```text
-IRQ disabled
-system_init
-IRQ enabled
-super-loop
+clock
+frequency
+timeout
+buffer size
+address
+threshold
+sample rate
+debounce
 ```
 
-Nếu init function cần interrupt để tiến triển, có ba lựa chọn:
+## 23. Compile-Time Validation
 
-1. đổi init design để không cần IRQ,
-2. enable IRQ có kiểm soát trước phần đó và document lifecycle,
-3. chuyển operation ra runtime process.
+Reject invalid relationships early.
 
-Không âm thầm dùng SysTick timeout khi global IRQ đang disabled.
-
-## 22. Add configuration
-
-Chia config theo concern:
+Examples:
 
 ```text
-board_config.h
-mcal_config.h
-service_config.h
-application_config.h
+buffer size < 2
+DMA sample count odd
+frequency = 0
+page write > 256
+invalid I2C address
+ADC clock limit exceeded
 ```
 
-Template chỉ có `project_config.h`, nhưng numbered examples cho thấy pattern chia config khi project lớn hơn.
+## 24. Do Not Use Heap Allocation
 
-## 23. Compile-time validation
-
-Ví dụ ring size:
-
-```c
-#if SIZE < 2
-#error ...
-#endif
-
-#if (SIZE & (SIZE - 1)) != 0
-#error ...
-#endif
-```
-
-Validation gần source of truth.
-
-## 24. Không dùng heap
-
-Ưu tiên:
+Prefer:
 
 ```text
-static storage
-fixed ring
-fixed queue
-caller-owned buffer
+static buffers
+fixed capacities
+explicit ownership
 ```
 
-Nếu một feature thật sự cần allocator, đó là architectural decision riêng chứ không thêm ngầm.
+This improves predictability and ISR safety.
 
-## 25. Add debug observability
+## 25. Add Debug Observability
 
-Cho learning/example project, expose bounded diagnostics:
+Expose useful counters/state such as:
 
 ```text
-error counters
-last value
-sequence number
 overflow count
-state enum
+error count
+sequence
+JEDEC ID
+verification flags
 ```
 
-Không biến mọi internal variable thành global.
+Do not add unnecessary I/O solely for debugging when GDB can inspect the
+state.
 
-## 26. Update documentation
-
-Mỗi feature/example nên có:
+## 26. Update Documentation
 
 ### README
 
-- purpose,
-- wiring,
-- configuration,
-- behavior,
-- build/flash/debug,
-- expected result,
+Document:
+
+- wiring;
+- configuration;
+- initialization;
+- runtime behavior;
+- expected result;
 - troubleshooting.
 
-### architecture.md
+### `architecture.md`
 
-- dependency graph,
-- ownership,
-- ISR/thread handoff,
-- concurrency,
-- state.
+Document:
 
-### porting_guide.md
+- ownership;
+- data flow;
+- ISR boundary;
+- concurrency;
+- failure path.
 
-- pin/peripheral/clock changes,
-- MCU changes,
-- validation checklist.
+### `porting_guide.md`
 
-## 27. Run layer checker
+Document:
+
+- pins;
+- clock;
+- peripheral instance;
+- IRQ/DMA mapping;
+- validation.
+
+## 27. Run the Layer Checker
 
 ```bash
 make check-layers
 ```
 
-Sửa architecture violation thay vì thêm exception không cần thiết.
+Fix architecture violations instead of weakening the checker.
 
-## 28. Build sạch
+## 28. Build Cleanly
 
 ```bash
 make clean
 make
+```
+
+## 29. Inspect Map/Symbols
+
+Use:
+
+```bash
 make size
 ```
 
-Đọc warnings; không chỉ nhìn exit code.
+and inspect the map/listing when verifying:
 
-## 29. Inspect map/symbols
+- memory use;
+- handler ownership;
+- static buffers;
+- section placement.
 
-Kiểm tra:
+## 30. Hardware Bring-Up Strategy
 
-```bash
-arm-none-eabi-size -A build/firmware.elf
-arm-none-eabi-nm build/firmware.elf
-```
+Bring up in layers:
 
-Với IRQ, xác nhận symbol mạnh.
+1. power/wiring;
+2. clock;
+3. GPIO;
+4. peripheral registers;
+5. polling/IRQ/DMA;
+6. BSP;
+7. Service;
+8. Application.
 
-Với large static buffer, xem `.bss` tăng đúng dự kiến.
+## 31. Module Addition Checklist
 
-## 30. Hardware bring-up strategy
-
-Không test toàn stack cùng lúc nếu peripheral phức tạp.
-
-Ví dụ SPI flash:
-
-1. xác nhận SCK/CS,
-2. đọc JEDEC ID,
-3. đọc status,
-4. WREN/WEL,
-5. erase,
-6. program,
-7. read-back.
-
-ADC/DMA:
-
-1. timer trigger,
-2. ADC conversion,
-3. DMA movement,
-4. IRQ,
-5. Service processing.
-
-## 31. Checklist thêm module
-
-- [ ] Requirement/API semantic rõ.
-- [ ] Layer owner đúng.
-- [ ] Platform address/register bits đúng.
-- [ ] Clock source đúng.
-- [ ] GPIO mode đúng.
-- [ ] Error/status clear đúng.
-- [ ] Polling có bound.
-- [ ] ISR bounded.
-- [ ] Shared state có ownership.
-- [ ] Không callback upward từ ISR.
-- [ ] Init order đúng.
-- [ ] Layer checker pass.
-- [ ] Clean build.
-- [ ] Debug observability có đủ.
-- [ ] Docs cập nhật.
+- [ ] requirement defined;
+- [ ] correct layer chosen;
+- [ ] base/register/bit definitions added;
+- [ ] MCAL API generic;
+- [ ] RCC/GPIO setup correct;
+- [ ] polling bounded;
+- [ ] ISR ownership correct;
+- [ ] NVIC configured through proper layer;
+- [ ] BSP mapping added;
+- [ ] ECUAL transport clean;
+- [ ] Service hardware-independent;
+- [ ] Application contains no low-level include;
+- [ ] IRQ lifecycle considered;
+- [ ] compile-time validation added;
+- [ ] debug observability added;
+- [ ] docs updated;
+- [ ] layer checker passes;
+- [ ] clean build passes;
+- [ ] hardware test passes.

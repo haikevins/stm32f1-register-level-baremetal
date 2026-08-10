@@ -1,652 +1,467 @@
 # STM32F103 Register-Level Bare-Metal Template
 
-Template này là bộ khung tối thiểu để tạo một firmware **register-level, bare-metal** cho **STM32F103C8T6 Blue Pill**. Nó đã có startup, vector table, linker script, runtime init, build system, fault handling, layer checker và skeleton module; phần peripheral/product behavior được để trống để project mới chỉ thêm đúng những module cần thiết.
+## 1. When to Use This Template
 
-## 1. Khi nào nên dùng template này
+Use this template when starting a small STM32F103C8T6 project that should:
 
-Dùng `template/` khi:
+- access peripherals through your own MCAL and register definitions;
+- own startup and linker behavior;
+- keep Application independent from hardware registers;
+- use explicit initialization order;
+- use a cooperative super-loop;
+- avoid HAL/LL/SPL/RTOS framework ownership.
 
-- bắt đầu một example/project register-level mới,
-- muốn giữ cùng convention với chuỗi `examples/`,
-- muốn tự định nghĩa register thay vì dùng HAL/LL/SPL,
-- cần startup/linker/build dễ kiểm tra,
-- cần architecture boundary ngay từ đầu,
-- muốn tránh việc prototype nhanh rồi phải refactor toàn bộ dependency về sau.
+The template is intentionally minimal. It is a foundation for building new
+examples or projects, not a finished application.
 
-Không nên coi template là một framework hoàn chỉnh. Nó cố tình nhỏ và explicit.
+## 2. Current Target
 
-## 2. Target hiện tại
-
-| Hạng mục | Giá trị |
+| Item | Value |
 |---|---|
 | MCU | STM32F103C8T6 |
-| Board | Blue Pill |
 | CPU | Arm Cortex-M3 |
-| Flash trong linker | 64 KiB |
-| SRAM trong linker | 20 KiB |
+| Flash | 64 KiB |
+| SRAM | 20 KiB |
+| External crystal | 8 MHz HSE |
+| Normal clock target | 72 MHz |
 | Language | C11 + GNU assembler |
-| Compiler | `arm-none-eabi-gcc` |
 | Build | GNU Make |
-| Debug server | OpenOCD |
-| Debugger | `arm-none-eabi-gdb` hoặc `gdb-multiarch` |
-| Interface | SWD |
-| RTOS | Không |
-| Heap | Không được template sử dụng |
-| HAL/LL/SPL | Không |
+| Debug | OpenOCD + GDB |
+| Peripheral access | custom register definitions |
 
-## 3. Cấu trúc thư mục
+## 3. Directory Structure
 
 ```text
-template/
-├── app/
-│   ├── include/application.h
-│   └── src/application.c
-├── bsp/
-│   └── bluepill/
-│       ├── include/board.h
-│       ├── include/board_pins.h
-│       └── src/board.c
-├── common/
-│   ├── include/compiler.h
-│   ├── include/project_types.h
-│   └── src/
-├── config/
-│   └── project_config.h
-├── docs/
-│   ├── architecture.md
-│   ├── adding_a_module.md
-│   └── porting_guide.md
-├── ecual/
-│   ├── include/
-│   └── src/
-├── linker/
-│   └── stm32f103c8t6.ld
-├── mcal/
-│   ├── include/
-│   └── src/
-├── platform/
-│   ├── arch/cortex-m3/
-│   └── device/stm32f103xb/
-├── services/
-│   ├── include/
-│   └── src/
-├── startup/
-│   ├── startup_stm32f103xb.S
-│   └── runtime_init.c
-├── system/
-│   ├── main.c
-│   ├── system.h
-│   ├── system_control.c
-│   ├── system_fault.c
-│   └── system_init.c
-├── tests/host/
-├── tools/
-│   ├── gdb/
-│   ├── openocd/
-│   └── scripts/
-└── Makefile
-```
-
-Các `.gitkeep` chỉ tồn tại để giữ thư mục trống trong Git.
-
-## 4. Architecture mục tiêu
-
-```text
-Application
-    ↓
-Services
-    ↓
-BSP / ECUAL
-    ↓
-MCAL
-    ↓
-Device / Architecture
-    ↓
-Hardware
-```
-
-Infrastructure đứng ngoài chuỗi runtime:
-
-```text
+app/
+services/
+ecual/
+bsp/bluepill/
+mcal/
+platform/
+common/
+config/
 system/
 startup/
 linker/
-config/
+tests/
 tools/
+docs/
 ```
 
-`system/` được phép biết nhiều tầng vì nó là **composition root**, nhưng không nên chứa product behavior.
+The directory layout represents dependency ownership.
 
-## 5. Dependency rule
+## 4. Target Architecture
+
+```text
+Application
+    |
+    v
+Services
+    |
+    +------> BSP
+    |
+    +------> ECUAL
+                  |
+                  v
+                 MCAL
+                  |
+                  v
+          Platform Device
+                  |
+                  v
+       Platform Architecture
+```
+
+`system/` is the composition root.
+
+## 5. Dependency Rules
 
 ### Application
 
-Được phụ thuộc:
+May depend on:
 
 ```text
-app
-services
-common
-config
+Application
+Services
+Common
+Config
 ```
 
-Không được include:
-
-```text
-board_*.h
-mcal_*.h
-stm32f103xb*.h
-cortex_m3_registers.h
-```
+Must not include BSP, ECUAL, MCAL, Platform, or register headers.
 
 ### Services
 
-Được dùng:
+May depend on:
 
 ```text
-bsp
-ecual
-common
-config
+Services
+BSP
+ECUAL
+Common
+Config
 ```
 
-Service nên expose semantic API thay vì raw register/peripheral concept.
+Must remain independent from raw STM32 registers.
 
 ### BSP
 
-Biết:
+Owns physical board resources:
 
-- board pin,
-- active level,
-- peripheral instance,
-- board-specific wiring,
-- actual bus resource.
+- pins;
+- peripheral instance selection;
+- active polarity;
+- board wiring;
+- composition of MCAL resources.
 
-BSP dùng MCAL, không gọi Service/Application.
+BSP may depend on MCAL.
 
 ### ECUAL
 
-Dành cho external component như:
+Owns off-chip device protocols such as:
 
-- SSD1306,
-- W25Q64,
-- sensor,
-- EEPROM,
-- radio.
+- SSD1306;
+- W25Q64;
+- sensors;
+- EEPROMs.
 
-ECUAL nên giữ device protocol, không chứa product policy.
+ECUAL should depend on generic transport APIs rather than a particular board
+pin map.
 
 ### MCAL
 
-Là nơi truy cập peripheral STM32 register:
+Owns MCU peripheral behavior:
 
-- RCC,
-- GPIO,
-- UART,
-- SPI,
-- I2C,
-- TIM,
-- ADC,
-- DMA,
-- EXTI...
+- RCC;
+- GPIO;
+- SysTick;
+- EXTI;
+- NVIC;
+- USART;
+- timers;
+- I2C;
+- SPI;
+- ADC;
+- DMA.
+
+MCAL depends on Platform Device and Platform Architecture where required.
 
 ### Platform
 
-Chỉ mô tả:
+Platform Device owns:
 
-- core primitives,
-- memory map,
-- register layouts,
-- IRQ numbers,
-- bit masks.
+- base addresses;
+- register structures;
+- bit definitions;
+- IRQ numbers.
 
-## 6. Layer checker
+Platform Architecture owns Cortex-M3 core instructions and registers.
 
-Makefile chạy:
+## 6. Layer Checker
+
+Run:
 
 ```bash
 make check-layers
 ```
 
-Script:
+The checker rejects forbidden project-header dependencies.
+
+It is intentionally simple and should be treated as a guardrail, not a
+replacement for design review.
+
+## 7. Startup Sequence
+
+The startup assembly provides the vector table and Reset Handler.
+
+Conceptual sequence:
 
 ```text
-tools/scripts/check_layers.py
+Reset_Handler
+    |
+    +--> initialize stack from vector table
+    +--> copy .data
+    +--> zero .bss
+    +--> call main()
 ```
 
-quét `#include "..."` và xác định owner layer của header.
+Unused handlers are weak aliases to `Default_Handler`.
 
-Mục tiêu của checker là bắt lỗi architecture sớm.
+A module takes ownership of an interrupt by implementing the exact strong
+handler name expected by the vector table.
 
-Ví dụ sai:
+## 8. Runtime Initialization
+
+The common runtime pattern is:
+
+```text
+main()
+    |
+    +--> disable global IRQ
+    +--> system_init()
+    +--> enable global IRQ
+    +--> super-loop
+```
+
+This means initialization code cannot assume an interrupt-driven timebase is
+already advancing.
+
+If startup hardware settling is required before IRQ enable, use a bounded
+busy-wait implementation designed for that phase.
+
+## 9. Linker Script
+
+The linker script defines:
+
+- FLASH origin/length;
+- RAM origin/length;
+- vector placement;
+- `.text`;
+- `.data`;
+- `.bss`;
+- stack top symbols.
+
+When porting to another MCU density, update the linker memory geometry before
+trusting the build.
+
+## 10. Vector Table and Interrupt Extension
+
+To add an interrupt:
+
+1. verify the vector name in startup;
+2. configure the peripheral;
+3. clear stale pending flags;
+4. configure the NVIC through MCAL;
+5. implement the strong handler in the lowest owning module;
+6. keep the ISR bounded;
+7. hand data/events to thread mode.
+
+## 11. Fault Handling
+
+Fault handlers default to the startup `Default_Handler` unless a project
+provides dedicated handlers.
+
+A production project can add:
+
+- HardFault diagnostics;
+- stacked-register capture;
+- reset reason logging;
+- watchdog recovery.
+
+Keep those mechanisms below Application policy where possible.
+
+## 12. `main()` and Composition
+
+The normal `main()` structure is:
 
 ```c
-/* app/src/application.c */
-#include "mcal_gpio.h"
-```
-
-Ví dụ đúng:
-
-```c
-/* app/src/application.c */
-#include "indication_service.h"
-```
-
-Checker không thay thế code review; nó chỉ kiểm tra dependency qua include mà nó nhận diện được.
-
-## 7. Startup sequence
-
-`startup/startup_stm32f103xb.S` tạo vector table tại section `.isr_vector`.
-
-Hai entry đầu:
-
-```text
-initial MSP = _estack
-Reset vector = Reset_Handler
-```
-
-`Reset_Handler`:
-
-```asm
-bl runtime_init
-```
-
-Nếu `runtime_init()` bất ngờ return, handler rơi vào infinite loop.
-
-Unused IRQ handler là weak alias về `Default_Handler`.
-
-## 8. Runtime initialization
-
-`runtime_init.c` không dùng libc startup.
-
-Nó:
-
-```text
-_sidata → copy → _sdata.._edata
-zero _sbss.._ebss
-call main()
-infinite loop nếu main return
-```
-
-Điều này bảo đảm:
-
-- initialized global/static `.data` có giá trị đúng,
-- zero-initialized `.bss` đúng,
-- firmware không phụ thuộc CRT của host/vendor.
-
-## 9. Linker script
-
-Memory:
-
-```ld
-FLASH : ORIGIN = 0x08000000, LENGTH = 64K
-RAM   : ORIGIN = 0x20000000, LENGTH = 20K
-```
-
-Các section chính:
-
-```text
-.isr_vector → FLASH
-.text/.rodata → FLASH
-.data → RAM, load image ở FLASH
-.bss → RAM NOLOAD
-.noinit → RAM NOLOAD
-```
-
-Stack top:
-
-```text
-_estack = end of RAM
-```
-
-Template reserve tối thiểu:
-
-```text
-_Min_Stack_Size = 0x400
-```
-
-và linker assert static data không lấn phần stack reserve.
-
-## 10. Vector table và interrupt extension
-
-Startup đã khai báo vector cho STM32F103 medium-density IRQ list.
-
-Peripheral chưa implement sẽ trỏ weak `Default_Handler`.
-
-Khi tạo ISR mạnh với đúng tên:
-
-```c
-void USART1_IRQHandler(void)
+int main(void)
 {
-    ...
+    cortex_m3_disable_irq();
+
+    if (!system_init())
+    {
+        system_panic();
+    }
+
+    cortex_m3_enable_irq();
+
+    for (;;)
+    {
+        application_process();
+        system_idle();
+    }
 }
 ```
 
-linker chọn strong symbol thay weak alias.
+Application behavior stays in `app/`.
 
-Điều này cho phép thêm IRQ module không cần sửa vector table mỗi lần.
+## 13. Template Idle Behavior
 
-## 11. Fault handling
+### Using `WFI`
 
-Template override mạnh:
+`WFI` is appropriate when:
 
-```text
-NMI_Handler
-HardFault_Handler
-MemManage_Handler
-BusFault_Handler
-UsageFault_Handler
-```
+- the system has reliable interrupt wake sources;
+- low-power idle is desired;
+- debug/reset behavior is acceptable.
 
-và gọi:
+### Using `NOP`
 
-```c
-system_panic();
-```
+`NOP` is appropriate when:
 
-Mục tiêu là không rơi vào vendor/default loop không rõ ownership.
+- predictable SWD attach is more important than low power;
+- the debug probe has no NRST connection;
+- the educational project should visibly continue executing.
 
-## 12. `main()` và composition
+The completed examples use `NOP`.
 
-Flow hiện tại:
+## 14. Cortex-M3 Abstraction
+
+The Architecture layer exposes helpers such as:
 
 ```text
-disable global IRQ
-    ↓
-system_init()
-    ↓
-nếu fail → system_panic()
-    ↓
-enable global IRQ
-    ↓
-for (;;)
-    application_process()
-    system_idle()
-```
-
-Việc disable IRQ trong init giúp module:
-
-- configure peripheral,
-- clear state,
-- configure NVIC,
-- hoàn tất Application init,
-
-trước khi interrupt bắt đầu chạy.
-
-Nếu một module init cần delay dựa trên interrupt timebase, phải xem lại lifecycle; numbered examples 06/07 dùng busy delay trong init vì lý do này.
-
-## 13. Idle behavior của template
-
-Template hiện dùng:
-
-```c
-void system_idle(void)
-{
-    cortex_m3_wait_for_interrupt();
-}
-```
-
-tức `WFI`.
-
-Numbered examples trong repository hiện đã đổi sang `NOP` để debug dễ hơn với ST-Link không có NRST. Khi clone template, chọn policy phù hợp:
-
-### Dùng `WFI`
-
-Ưu:
-
-- giảm active CPU/power,
-- wake theo interrupt.
-
-Nhược:
-
-- peripheral polling không chạy nếu không có wake source phù hợp,
-- debug workflow có thể khác.
-
-### Dùng `NOP`
-
-Ưu:
-
-- super-loop luôn chạy,
-- polling peripheral hoạt động,
-- SWD attach dễ dự đoán.
-
-Nhược:
-
-- CPU luôn active.
-
-Đây là system policy, không nên để từng Service tự gọi `WFI`.
-
-## 14. Cortex-M3 abstraction
-
-`cortex_m3.h` cung cấp primitive:
-
-```text
+NOP
+WFI
 enable IRQ
 disable IRQ
-WFI
-DSB
-ISB
-NOP
-system reset
+PRIMASK access
 ```
 
-`cortex_m3_system_reset()` dùng SCB AIRCR với VECTKEY + SYSRESETREQ.
+Core-register definitions such as NVIC, SCB, and SysTick belong in the
+Cortex-M3 platform layer.
 
-Core register layout nằm trong:
+Upper layers should not use inline assembly directly.
+
+## 15. Device Layer Skeleton
+
+Platform Device contains the STM32F103 register-level model.
+
+Typical files define:
 
 ```text
-platform/arch/cortex-m3/include/cortex_m3_registers.h
+memory base addresses
+peripheral register structs
+register bit masks
+IRQ numbers
+device constants
 ```
 
-## 15. Device layer skeleton
+MCAL consumes these definitions.
 
-`platform/device/stm32f103xb/` ban đầu chưa chứa toàn bộ peripheral register map.
-
-`stm32f103xb_memory.h` có bus bases:
-
-```text
-FLASH/SRAM
-PERIPH
-APB1
-APB2
-AHB
-```
-
-Khi thêm peripheral, chỉ thêm register/address/bit cần thiết thay vì copy một vendor header khổng lồ.
+Application and Services must not.
 
 ## 16. Makefile
 
-Compiler flags chính:
+The Makefile:
 
-```text
--mcpu=cortex-m3
--mthumb
--std=c11
--Og
--g3
--ffreestanding
--fno-builtin
--ffunction-sections
--fdata-sections
--fno-common
-```
+- discovers project C/assembly sources;
+- applies Cortex-M3 compiler flags;
+- links with the STM32F103C8T6 linker script;
+- generates binary/hex/listing/map files;
+- supports OpenOCD/GDB;
+- runs the architecture checker.
 
-Warning:
+## 17. Build Artifacts
 
-```text
--Wall
--Wextra
--Wpedantic
--Wshadow
--Wconversion
--Wundef
--Werror=implicit-function-declaration
-```
-
-Link:
-
-```text
--nostartfiles
--nostdlib
---gc-sections
-custom linker script
--lgcc
-```
-
-## 17. Build artifact
-
-```bash
-make
-```
-
-sinh:
+Typical output:
 
 ```text
 build/firmware.elf
-build/firmware.bin
 build/firmware.hex
-build/firmware.map
+build/firmware.bin
 build/firmware.lst
+build/firmware.map
 ```
 
-`firmware.elf` dùng để debug/symbolize; `.bin/.hex` thuận tiện cho flash tool; `.map/.lst` dùng audit layout/disassembly.
-
-## 18. Make targets
+## 18. Make Targets
 
 ```bash
-make check-layers
 make
+make clean
+make check-layers
 make size
 make tree
 make flash
 make erase
 make debug-server
 make debug
-make clean
 ```
-
-`make debug` kiểm tra GDB command trước khi chạy.
 
 ## 19. OpenOCD
 
-Config:
-
-```text
-tools/openocd/bluepill_stlink.cfg
-```
-
-Dùng:
+The default setup uses ST-Link with SWD and:
 
 ```tcl
-source [find interface/stlink.cfg]
-transport select hla_swd
-source [find target/stm32f1x.cfg]
 reset_config none
 adapter speed 1000
 ```
 
-`reset_config none` phù hợp khi NRST không nối từ probe.
+This matches a debug connection without NRST.
 
 ## 20. GDB
 
-`tools/gdb/debug.gdb`:
-
-```text
-connect localhost:3333
-reset halt
-load
-reset halt
-break main
-continue
-```
-
-Workflow:
-
 ```bash
-# terminal 1
+# Terminal 1
 make debug-server
 
-# terminal 2
+# Terminal 2
 make debug
 ```
 
-## 21. Cách tạo project mới từ template
+Useful first breakpoints:
 
-Copy template:
-
-```bash
-cp -R template my-project
-cd my-project
+```gdb
+break main
+break system_init
+break board_init
 ```
 
-Sau đó:
+## 21. Creating a New Project from the Template
 
-1. đổi `PROJECT` nếu cần,
-2. xác định behavior Application,
-3. định nghĩa semantic Services,
-4. thêm BSP resources,
-5. thêm MCAL peripheral,
-6. thêm Platform register map,
-7. update `system_init()`,
-8. update config,
-9. chạy layer check,
-10. build,
-11. viết README/architecture/porting guide.
+Recommended order:
 
-Xem [`docs/adding_a_module.md`](docs/adding_a_module.md).
+1. copy the template;
+2. define board pins/resources;
+3. add required Platform Device register definitions;
+4. implement MCAL peripheral support;
+5. implement BSP mapping;
+6. add ECUAL if the project has an external device;
+7. add Services;
+8. add Application behavior;
+9. connect initialization in `system_init()`;
+10. add ISR handoff where required;
+11. document wiring/test behavior;
+12. run layer checker;
+13. clean-build;
+14. hardware-test.
 
-## 22. Checklist trước khi coi project mới là hoàn chỉnh
+## 22. Completion Checklist
 
 ### Architecture
 
-- Application không include hardware layer.
-- ISR không gọi upward.
-- Board pin chỉ ở BSP.
-- Register access chỉ ở MCAL/Platform.
+- [ ] Application has no BSP/MCAL/Platform includes.
+- [ ] Services contain no register accesses.
+- [ ] BSP owns physical board mapping.
+- [ ] ECUAL owns external-device protocol.
+- [ ] ISR ownership is explicit.
 
 ### Runtime
 
-- `.data/.bss` init đúng.
-- `main()` hit.
-- init failure đi panic.
-- IRQ enable sau state init.
-- no hidden heap.
+- [ ] `.data` initializes correctly.
+- [ ] `.bss` is zeroed.
+- [ ] global IRQ lifecycle is intentional.
+- [ ] `system_init()` orders dependencies correctly.
+- [ ] `application_process()` is bounded.
+- [ ] panic behavior is intentional.
 
 ### Peripheral
 
-- clock input đúng,
-- RCC enable đúng,
-- GPIO mode đúng,
-- status/error flags clear đúng,
-- timeout có bound nếu polling,
-- IRQ pending clear trước enable nếu cần.
+- [ ] base address/register struct/bit masks are correct.
+- [ ] peripheral clock/reset logic is correct.
+- [ ] GPIO mode is correct.
+- [ ] bus/timer clock math is correct.
+- [ ] errors/timeouts/overflow are defined.
 
 ### Tooling
 
-```bash
-make check-layers
-make clean
-make
-make size
-```
+- [ ] `make check-layers` passes.
+- [ ] clean build passes.
+- [ ] map/size are reasonable.
+- [ ] OpenOCD connects.
+- [ ] GDB symbols are usable.
 
 ### Docs
 
-- wiring,
-- config,
-- expected behavior,
-- register flow,
-- debug,
-- troubleshooting,
-- porting notes.
+- [ ] README explains wiring and behavior.
+- [ ] architecture document explains ownership.
+- [ ] porting guide explains clock/pin/IRQ changes.
 
-## 23. Tài liệu
+## 23. Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — luật tầng/ownership.
-- [`docs/adding_a_module.md`](docs/adding_a_module.md) — quy trình thêm module.
-- [`docs/porting_guide.md`](docs/porting_guide.md) — đổi board/MCU.
-- [`../examples/README.md`](../examples/README.md) — example thực tế.
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/adding_a_module.md`](docs/adding_a_module.md)
+- [`docs/porting_guide.md`](docs/porting_guide.md)
 
 ## 24. License
 
-Xem [`LICENSE`](LICENSE).
+See `LICENSE`.

@@ -1,293 +1,267 @@
-# Porting Guide — template
+# Porting Guide — Template
 
-Porting nên được làm theo boundary, không sửa tất cả layer cùng lúc. Mục tiêu tốt nhất là giữ Application/Service càng nguyên vẹn càng tốt.
+## 1. Case A — New Project on the Same Blue Pill
 
-## 1. Trường hợp A — project mới trên cùng Blue Pill
+Keep:
 
-Giữ:
+- startup;
+- linker;
+- platform architecture;
+- STM32F103 device layer.
 
-```text
-startup/
-linker/
-platform/
-system skeleton
-tools/
-```
+Change:
 
-Thêm/đổi:
+- board resources;
+- MCAL modules as required;
+- Services;
+- Application;
+- configuration.
+
+## 2. Case B — Different Board, Same STM32F103C8T6
+
+Usually keep:
 
 ```text
 app/
 services/
-bsp resources
-ecual
-mcal modules
-config
-```
-
-Đây là use case đơn giản nhất.
-
-## 2. Trường hợp B — board khác nhưng vẫn STM32F103C8T6
-
-Tạo BSP mới:
-
-```text
-bsp/<board-name>/
-```
-
-Thay include path/source selection trong Makefile nếu muốn giữ nhiều BSP.
-
-BSP mới định nghĩa:
-
-- LED,
-- button,
-- console UART,
-- external-device CS,
-- sensor bus pins,
-- crystal frequency nếu khác.
-
-Platform/MCAL có thể giữ nếu MCU giống.
-
-## 3. Trường hợp C — STM32F103 nhưng memory density khác
-
-Cần ít nhất:
-
-- linker FLASH/RAM lengths,
-- có thể vector/device variant,
-- startup IRQ list nếu density line khác,
-- peripheral availability.
-
-Không assume C8 linker 64K/20K cho mọi part.
-
-## 4. Trường hợp D — STM32F1 part khác
-
-Rà:
-
-```text
-platform/device/
-startup/
-linker/
+ecual/
 mcal/
-```
-
-Có thể giữ Cortex-M3 architecture layer nếu core giống.
-
-Kiểm tra:
-
-- base address,
-- IRQ number,
-- peripheral count,
-- GPIO ports,
-- DMA mapping,
-- timer channels,
-- clock tree,
-- Flash latency rules.
-
-## 5. Trường hợp E — MCU family khác nhưng vẫn Cortex-M
-
-Thay device layer và phần lớn MCAL.
-
-Có thể giữ ý tưởng Architecture primitive, nhưng register như SCB/SysTick/NVIC phụ thuộc Cortex profile/version; không copy mù.
-
-Application/portable Service lý tưởng vẫn giữ.
-
-## 6. Trường hợp F — architecture khác
-
-Thay:
-
-```text
-platform/arch/
+platform/
 startup/
 linker/
-compiler flags
-fault model
-interrupt primitives
 ```
 
-Đây là port sâu.
-
-## 7. BSP selection strategy
-
-Nếu một repo chứa nhiều board, không nên rải:
-
-```c
-#ifdef BOARD_X
-```
-
-khắp MCAL/Application.
-
-Ưu tiên:
-
-- thư mục BSP riêng,
-- build variable chọn include/source,
-- cùng public board API.
-
-## 8. Clock porting
-
-Clock là nguồn lỗi phổ biến.
-
-Lập bảng:
-
-| Clock | Normal | Fallback | Consumer |
-|---|---:|---:|---|
-| SYSCLK | ... | ... | core/SysTick |
-| PCLK1 | ... | ... | I2C/USART2/TIM |
-| PCLK2 | ... | ... | USART1/SPI1/ADC |
-| Timer input | ... | ... | PWM/trigger |
-| ADC clock | ... | ... | ADC |
-
-Không hard-code tần số vào peripheral driver nếu có thể truyền actual clock.
-
-## 9. GPIO porting
-
-Với mỗi pin:
+Review:
 
 ```text
-function
-port/pin
-input/output/AF/analog
-pull/open-drain
-active level
-speed
-remap
+bsp/
+config/
+tools/openocd/
 ```
 
-Pin mapping thuộc BSP.
+## 3. Case C — STM32F103 with Different Memory Density
 
-## 10. Interrupt porting
+Update:
 
-Checklist:
+- linker FLASH/RAM sizes;
+- startup vector assumptions if the device variant differs;
+- device constants;
+- OpenOCD target expectations.
 
-- vector name,
-- IRQ number,
-- priority bits,
-- pending-clear sequence,
-- peripheral source enable,
-- shared state,
-- strong symbol,
-- grouped IRQ behavior.
+Do not assume the C8 memory map is correct for another density.
 
-Một ISR compile được chưa có nghĩa vector mapping đúng.
+## 4. Case D — Different STM32F1 Part
 
-## 11. DMA porting
+Review:
 
-DMA mapping thường khác đáng kể giữa MCU.
+- memory map;
+- peripheral base addresses;
+- register differences;
+- available peripherals;
+- IRQ numbers;
+- alternate-function mapping;
+- clock tree;
+- startup vectors;
+- linker memory.
 
-Xác minh:
+MCAL may require partial changes.
+
+## 5. Case E — Different MCU Family but Still Cortex-M
+
+Higher layers can often remain.
+
+Replace or heavily adapt:
 
 ```text
-request source
-controller/channel/stream
-data width
-direction
-increment
-circular
-IRQ
-flag clear
+Platform Device
+MCAL
+BSP
+startup
+linker
+clock setup
+OpenOCD target
 ```
 
-Không copy `ADC1 → DMA1 Channel1` sang MCU khác theo thói quen.
+Platform Architecture may remain partly reusable if the target is still
+compatible Cortex-M.
 
-## 12. External-device driver portability
+## 6. Case F — Different Architecture
 
-ECUAL transport-based driver thường port dễ nhất.
+Port:
 
-Nếu driver chỉ nhận:
+- architecture intrinsics;
+- interrupt model;
+- startup;
+- linker;
+- critical sections;
+- toolchain flags;
+- device layer.
+
+The conceptual layered design can still be retained.
+
+## 7. BSP Selection Strategy
+
+Keep logical resource names stable.
+
+Example:
 
 ```text
-transfer
-select
-deselect
-delay
+STATUS_LED
+USER_BUTTON
+DISPLAY_BUS
+MEMORY_BUS
+ADC_INPUT
 ```
 
-thì đổi MCU chủ yếu thay BSP/MCAL.
+Only BSP maps those resources to physical pins/peripherals.
 
-Đây là lý do giữ device protocol không phụ thuộc register STM32.
+## 8. Clock Porting
 
-## 13. Linker porting
+Validate:
 
-Cập nhật:
+- oscillator source;
+- startup timeout;
+- PLL settings;
+- SYSCLK;
+- PCLK1/PCLK2;
+- timer multiplier rule;
+- flash wait states;
+- peripheral frequency limits.
+
+Never copy 72 MHz assumptions blindly.
+
+## 9. GPIO Porting
+
+For each pin verify:
+
+- port base;
+- clock enable;
+- CRL/CRH field;
+- MODE/CNF combination;
+- pull behavior;
+- active polarity;
+- AF routing.
+
+## 10. Interrupt Porting
+
+Verify:
+
+- vector index;
+- IRQ number;
+- handler name;
+- NVIC priority field width;
+- pending-clear behavior;
+- peripheral flag clear sequence.
+
+## 11. DMA Porting
+
+DMA mapping is highly device-specific.
+
+Verify:
+
+- peripheral-to-channel mapping;
+- channel register layout;
+- transfer width;
+- address increment;
+- circular mode;
+- interrupt flags;
+- clear registers.
+
+## 12. External-Device Driver Portability
+
+Keep ECUAL unchanged when:
+
+- the external device is unchanged;
+- the transport semantics are unchanged.
+
+Replace only the board bus/MCAL below it.
+
+## 13. Linker Porting
+
+Update:
+
+- FLASH origin/length;
+- RAM origin/length;
+- vector placement;
+- stack top;
+- section alignment.
+
+Then inspect the linked map.
+
+## 14. Startup Porting
+
+The startup file must match:
+
+- architecture;
+- vector count/order;
+- reset semantics;
+- section initialization.
+
+Do not reuse an STM32F103 vector table on an unrelated MCU.
+
+## 15. Toolchain Flags
+
+Review:
 
 ```text
-FLASH ORIGIN/LENGTH
-RAM ORIGIN/LENGTH
-stack reserve
-section placement
+-mcpu
+-mthumb
+-float ABI if applicable
+linker script
+assembler target
 ```
-
-Nếu MCU có nhiều RAM bank/Flash bank, linker cần thiết kế lại, không chỉ đổi LENGTH.
-
-## 14. Startup porting
-
-Vector table phải phù hợp MCU.
-
-Runtime `.data/.bss` copy có thể tái sử dụng nếu memory model tương tự, nhưng linker symbols phải đồng bộ.
-
-## 15. Toolchain flags
-
-Template hiện:
-
-```text
--mcpu=cortex-m3 -mthumb
-```
-
-Đổi core phải sửa.
-
-FPU-capable MCU cần quyết định ABI/FPU flags thống nhất compile/link.
 
 ## 16. OpenOCD
 
-Target config:
+Change the target configuration when the MCU family/device changes.
 
-```tcl
-source [find target/stm32f1x.cfg]
-```
+Use a conservative adapter speed for first bring-up.
 
-phải đổi khi target family đổi.
+## 17. Debug Reset Strategy
 
-Adapter config/reset wiring cũng có thể khác.
-
-## 17. Debug reset strategy
-
-Hiện config:
+Current setup uses:
 
 ```tcl
 reset_config none
 ```
 
-phù hợp setup không NRST.
+because NRST may not be wired.
 
-Nếu board/probe có NRST và cần connect-under-reset, có thể thay strategy, nhưng cần test với hardware thực.
+If the new board/probe supports NRST reliably, hardware reset may be enabled
+after validation.
 
-## 18. Validation theo tầng
+## 18. Validation by Layer
 
 ### Startup
 
-- vector ở đúng address,
-- MSP đúng,
-- `main` hit.
+- reset reaches `main`;
+- `.data` correct;
+- `.bss` zero;
+- stack valid.
 
 ### Clock
 
-- clock register đúng,
-- peripheral clock đo/derive đúng.
+- active clock source correct;
+- SYSCLK correct;
+- APB clocks correct.
 
 ### GPIO
 
-- level/mode đúng.
+- physical electrical mode correct;
+- output polarity correct.
 
 ### Peripheral
 
-- minimal transaction.
+- register configuration correct;
+- polling/IRQ/DMA works.
 
 ### Service/Application
 
-- behavior end-to-end.
+- logical behavior remains hardware-independent.
 
-## 19. Automated checks
+## 19. Automated Checks
 
-Luôn chạy:
+Run:
 
 ```bash
 make check-layers
@@ -296,18 +270,17 @@ make
 make size
 ```
 
-Sau port lớn, inspect map file.
+## 20. Port Acceptance Checklist
 
-## 20. Port acceptance checklist
-
-- [ ] Linker đúng memory.
-- [ ] Startup/vector đúng MCU.
-- [ ] CPU flags đúng.
-- [ ] Clock tree đúng.
-- [ ] BSP pins đúng.
-- [ ] MCAL base/bit đúng.
-- [ ] IRQ/DMA mapping đúng.
-- [ ] Application không bị hardware detail rò lên.
-- [ ] Layer checker pass.
-- [ ] Hardware test pass.
-- [ ] Docs wiring/config cập nhật.
+- [ ] linker matches memory;
+- [ ] startup matches device;
+- [ ] clock tree verified;
+- [ ] register map verified;
+- [ ] BSP pins verified;
+- [ ] MCAL peripheral verified;
+- [ ] IRQ numbers/handlers verified;
+- [ ] DMA mapping verified if used;
+- [ ] OpenOCD connects;
+- [ ] layer checker passes;
+- [ ] clean build passes;
+- [ ] hardware behavior matches the original logical contract.

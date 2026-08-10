@@ -1,511 +1,400 @@
-# Kiến trúc và luật dependency của template
+# Template Architecture and Dependency Rules
 
-Tài liệu này là quy ước kiến trúc cho project register-level. Mục tiêu không phải tạo thật nhiều layer, mà bảo đảm **hardware details đi xuống**, còn **product policy ở trên**.
-
-## 1. Runtime layers
+## 1. Runtime Layers
 
 ```text
 Application
-    ↓
+    |
+    v
 Services
-    ↓
-BSP / ECUAL
-    ↓
-MCAL
-    ↓
-STM32F103 Device / Cortex-M3 Architecture
-    ↓
-Hardware
+    |
+    +------> BSP
+    |
+    +------> ECUAL
+                  |
+                  v
+                 MCAL
+                  |
+                  v
+          Platform Device
+                  |
+                  v
+       Platform Architecture
 ```
 
-Ngoài runtime layers:
+System is the composition root and is not a layer that Application consumes.
 
-```text
-system   = composition/lifecycle
-startup  = reset/vector/runtime entry
-linker   = memory placement
-config   = compile-time policy
-tools    = build/debug/static architecture checks
-common   = portable primitives/types
-```
+## 2. Dependency Matrix
 
-## 2. Dependency matrix
+The project checker enforces a downward dependency direction similar to:
 
-| Source layer | Được phụ thuộc | Không được phụ thuộc |
-|---|---|---|
-| `app` | app, services, common, config | bsp, ecual, mcal, platform |
-| `services` | services, bsp, ecual, common, config | app, raw platform |
-| `ecual` | ecual, mcal, common, config | app, services |
-| `bsp` | bsp, mcal, common, config | app, services |
-| `mcal` | mcal, platform, common, config | bsp, ecual, services, app |
-| `platform` | platform, common, config | mọi upper layer |
-| `common` | common, config | hardware layer |
-| `system` | composition exception | không nên chứa product behavior |
-| `startup` | startup/common/config | runtime product layer |
+| Source layer | Allowed project dependencies |
+|---|---|
+| Application | Application, Services, Common, Config |
+| Services | Services, BSP, ECUAL, Common, Config |
+| ECUAL | ECUAL, MCAL, Common, Config |
+| BSP | BSP, MCAL, Common, Config |
+| MCAL | MCAL, Platform, Common, Config |
+| Platform | Platform, Common, Config |
 
-`check_layers.py` encode gần đúng matrix này.
+`system/` may include all layers because it wires the runtime together.
 
 ## 3. Application
 
-Application trả lời câu hỏi:
-
-```text
-"Hệ thống nên làm gì?"
-```
-
-Ví dụ:
-
-```text
-nút press → toggle indication
-ADC > threshold → LED on
-UART byte → parse command
-mỗi 100 ms → update UI
-```
-
-Application không trả lời:
-
-```text
-"GPIO register nào cần set?"
-"USART1 ở địa chỉ nào?"
-"PB6 là SCL?"
-```
+Application owns product/demo policy.
 
 ### Good
 
-```c
-if (button_service_take_press())
-{
-    indication_service_toggle(INDICATION_STATUS);
-}
+```text
+if button pressed -> toggle indicator
+if 500 ms elapsed -> update state
+if ADC voltage high -> turn indicator on
 ```
 
 ### Bad
 
-```c
-GPIOC->BSRR = ...;
+```text
+write GPIO register
+set USART BRR
+clear DMA flags
+configure RCC bits
 ```
+
+Those are lower-layer responsibilities.
 
 ## 4. Services
 
-Service chuyển hardware/device capability thành semantic API.
+Services expose stable logical capabilities:
 
-Ví dụ:
+- time;
+- button;
+- indication;
+- serial;
+- PWM;
+- display;
+- memory;
+- ADC measurement.
 
-```text
-Time Service
-Serial Service
-Display Service
-Memory Service
-ADC Service
-Indication Service
-Button Service
-```
-
-Service có thể:
-
-- aggregate data,
-- debounce,
-- filter,
-- expose logical state,
-- compose BSP/ECUAL.
-
-Service không nên:
-
-- hard-code pin,
-- đọc raw STM32 register,
-- chứa ISR peripheral.
+They may debounce, filter, aggregate, or translate units.
 
 ## 5. BSP
 
-BSP trả lời:
+BSP owns board-specific resource selection:
 
-```text
-"Trên board này resource nằm ở đâu?"
-```
+- pin number;
+- port;
+- peripheral instance;
+- active polarity;
+- wiring;
+- board-level transport composition.
 
-Ví dụ:
-
-```text
-status LED = PC13 active-low
-UART console = USART1 PA9/PA10
-OLED bus = I2C1 PB6/PB7
-W25Q CS = PA4
-```
-
-BSP nên expose logical board resource:
-
-```c
-board_led_set(...)
-board_uart_try_write_byte(...)
-board_memory_bus_transfer(...)
-```
-
-Không đưa pin macro lên Service/Application.
+BSP calls MCAL rather than Platform registers directly.
 
 ## 6. ECUAL
 
-ECUAL model external device, ví dụ:
+ECUAL owns off-chip device semantics.
+
+### Transport Callback Pattern
+
+A reusable external-device driver should receive a generic transport rather
+than include BSP or MCAL.
+
+Example:
 
 ```text
-SSD1306
-W25Q64
-MPU sensor
-EEPROM
+Display Service
+    |
+SSD1306 ECUAL
+    ^
+    |
+transport callbacks
+    |
+Board Display Bus
+    |
+MCAL I2C
 ```
 
-Nó nên biết:
-
-- command/register protocol của device,
-- geometry/capability,
-- sequencing requirement.
-
-Nó không nên biết:
-
-- product threshold,
-- UI policy,
-- Blue Pill pin cụ thể.
-
-### Transport callback pattern
-
-Vì BSP và ECUAL cùng tầng, layer checker không cho ECUAL gọi BSP trực tiếp trong design hiện tại. Service có thể compose:
-
-```text
-BSP bus callbacks
-    ↓
-ECUAL transport interface
-```
-
-Pattern này xuất hiện ở numbered examples.
+This keeps the device driver portable.
 
 ## 7. MCAL
 
-MCAL là owner của MCU peripheral behavior:
+MCAL owns generic STM32 peripheral behavior.
+
+Public MCAL APIs should accept generic arguments rather than board pin names.
+
+Examples:
 
 ```text
-RCC
-GPIO
-EXTI
-USART
-SPI
-I2C
-TIM
-ADC
-DMA
-NVIC wrapper...
+mcal_gpio_configure()
+mcal_spi_transfer()
+mcal_i2c_init()
+mcal_systick_init()
 ```
-
-MCAL được phép:
-
-- dereference register structs,
-- set/clear bit,
-- wait hardware flags với bounded loop,
-- convert raw status thành portable error/event flags,
-- giữ peripheral-owned static state,
-- chứa ISR nếu module là owner thấp nhất.
-
-MCAL không được gọi upward.
 
 ## 8. Platform Device
 
-`platform/device/stm32f103xb` chứa:
+Platform Device owns STM32F103-specific register knowledge:
 
-```text
-memory base addresses
-register structs
-IRQ numbers
-register bit masks
-compile-time offset checks nếu cần
-```
+- base addresses;
+- register structures;
+- bit definitions;
+- interrupt numbers;
+- memory map.
 
-Nó không chứa policy kiểu:
-
-```text
-UART console baud = 115200
-OLED address = 0x3C
-```
-
-Đó là board/config concern.
+MCAL is the main consumer.
 
 ## 9. Platform Architecture
 
-`platform/arch/cortex-m3` chứa core-specific primitive:
+Platform Architecture owns Cortex-M3 core behavior:
 
-```text
-PRIMASK operations
-WFI/NOP
-barriers
-SCB reset
-SysTick/NVIC/SCB register layout
-```
+- NVIC register model;
+- SysTick core register model;
+- PRIMASK;
+- `NOP`;
+- `WFI`;
+- IRQ enable/disable.
 
-Nếu chuyển sang core khác, đây là boundary cần thay.
+The device layer should not duplicate architecture-core definitions.
 
 ## 10. Common
 
-`common/` chỉ chứa code portable:
+Common contains portable utilities and types.
 
-- fixed data types/structs,
-- generic static queue/ring algorithm nếu không hardware-specific,
-- compiler abstraction,
-- utility không include device header.
+Examples:
 
-Nếu một common file cần `STM32_RCC`, nó không còn là common.
+- byte ring buffer;
+- measurement structures;
+- compiler helpers;
+- generic status types.
 
-## 11. System as composition root
+Common should not depend on board or MCU registers.
 
-`system_init()` có thể gọi:
+## 11. System as Composition Root
 
-```text
-board_init
-service_init
-application_init
-```
+System is allowed to know multiple layers because it performs initialization.
 
-Nó là nơi wiring dependency.
-
-Không nên viết:
+Example:
 
 ```text
-nếu nút nhấn thì bật LED
+board_init()
+time_service_init()
+display_service_init()
+application_init()
 ```
 
-trong `system/`.
+System must not become a second Application module.
 
-## 12. Initialization order
+## 12. Initialization Order
 
-Rule:
+Initialize from lower dependency to upper dependency.
 
 ```text
-low-level physical state
-    ↓
-board resources
-    ↓
-services
-    ↓
-application state
-    ↓
-enable global runtime
+clock/peripheral
+    |
+board resource
+    |
+service / external device
+    |
+application
 ```
 
-Template `main()` disable IRQ trước init và enable sau init.
+Never initialize a Service before the hardware resource it requires.
 
-Nếu peripheral IRQ được NVIC enable trong init, handler vẫn chưa chạy tới khi PRIMASK mở.
+## 13. Interrupt Ownership
 
-## 13. Interrupt ownership
+The lowest module that owns the peripheral owns the strong handler.
 
-Nguyên tắc:
-
-> ISR thuộc tầng thấp nhất có ownership đủ để acknowledge peripheral và lưu dữ liệu/event cần thiết.
-
-ISR có thể:
-
-- clear pending,
-- read/write data register,
-- push byte vào fixed buffer,
-- snapshot event/error,
-- increment bounded counter.
-
-ISR không:
-
-- gọi Application callback,
-- debounce bằng delay,
-- parse protocol lớn,
-- render OLED,
-- erase flash,
-- allocate,
-- block chờ lâu.
-
-## 14. Interrupt-to-thread handoff patterns
-
-### Event bit
+Examples:
 
 ```text
-ISR set bit
-thread take+clear bit
+MCAL SysTick -> SysTick_Handler
+MCAL UART    -> USART1_IRQHandler
+Board ADC/DMA -> DMA1_Channel1_IRQHandler
 ```
 
-Phù hợp event không cần đếm mọi occurrence.
+The handler may publish low-level state upward only through static flags,
+counters, buffers, or blocks.
+
+## 14. Interrupt-to-Thread Handoff Patterns
+
+### Event Bit
+
+```text
+ISR: event_pending = true
+thread: take-and-clear
+```
 
 ### Counter
 
-```text
-ISR counter++
-thread read/take
-```
+Use when every event count matters.
 
-Phù hợp diagnostics.
-
-### Ring buffer
+### Ring Buffer
 
 ```text
-ISR producer
-thread consumer
+ISR producer -> ring -> thread consumer
+thread producer -> ring -> ISR consumer
 ```
 
-Phù hợp byte stream.
-
-### Block-ready
+### Block-Ready
 
 ```text
-DMA ISR publish completed block
-thread processing
+DMA IRQ -> completed block -> Service
 ```
 
-Phù hợp ADC/DMA.
+Useful for sampled data.
 
-## 15. Critical sections
+## 15. Critical Sections
 
-Critical section chỉ dùng quanh state thật sự shared.
+Use a short critical section only around atomic shared-state operations.
 
 Pattern:
 
 ```text
 save PRIMASK
 disable IRQ
-small state update
-restore PRIMASK nếu trước đó enabled
+copy/read-clear shared state
+restore PRIMASK
 ```
 
-Không disable IRQ quanh:
+Never keep interrupts disabled while performing:
 
-- long copy nếu tránh được,
-- erase flash,
-- I/O transaction dài,
-- delay.
-
-Khi code hiện tại buộc copy block trong critical/ISR, document timing trade-off.
+- I2C polling;
+- SPI flash operations;
+- formatting;
+- long memory copies unless strictly justified.
 
 ## 16. Volatile
 
-`volatile` cần cho memory-mapped register và một số ISR-shared state để compiler không optimize access mất đi.
+Use `volatile` when state may change asynchronously.
 
-`volatile` **không** tự tạo:
+`volatile` does not guarantee:
 
-- atomic multi-word transaction,
-- mutex,
-- memory ownership,
-- race-free algorithm.
+- atomic read-modify-write;
+- queue correctness;
+- mutual exclusion;
+- memory ownership.
 
-Thiết kế ownership vẫn là chính.
+Use explicit concurrency design.
 
-## 17. Polling API naming
+## 17. Polling API Naming
 
-Nếu API không chờ:
+Prefer:
 
-```c
+```text
 try_read
 try_write
 take_event
-take_error
+is_ready
+process
 ```
 
-Tên function phải phản ánh semantics.
+If an operation may wait, document the timeout or poll bound.
 
-Nếu API block:
+## 18. Error Handling
 
-- document timeout,
-- document execution context được phép,
-- tránh gọi từ ISR.
+Represent low-level failure using:
 
-## 18. Error handling
+- `bool`;
+- error/status enum;
+- counter;
+- pending event.
 
-Tầng thấp nên trả state dễ reason:
+Examples:
 
 ```text
-bool
-enum status
-portable error flags
-counters
+UART overflow
+I2C timeout
+SPI timeout
+DMA transfer error
+ADC calibration failure
 ```
 
-Upper layer quyết định policy:
+Do not silently discard important fault information.
+
+## 19. Clock Ownership
+
+Application expresses behavior in:
 
 ```text
-retry
-panic
-degrade
-show error
-drop data
+milliseconds
+Hz
+baud
+permille
+millivolts
 ```
 
-Không hard-code product recovery trong MCAL.
+MCAL/BSP converts those values using the actual clock tree.
 
-## 19. Clock ownership
+Application must not know PSC, ARR, BRR, CCR, or ADCPRE values.
 
-RCC/MCAL biết clock tree; BSP biết peripheral nào dùng bus nào; Application không hard-code peripheral clock.
+## 20. Board Active Level
 
-Driver nên nhận actual clock:
+Active-low hardware must be hidden below the logical Service boundary.
 
-```c
-mcal_x_init(peripheral_clock_hz, target_rate)
+For the Blue Pill LED:
+
+```text
+logical ON -> BSP drives PC13 LOW
 ```
 
-thay vì assume 72 MHz.
+Application still requests "ON", not "LOW".
 
-## 20. Board active level
+## 21. External-Device Geometry
 
-Active-low/active-high là BSP concern.
+External-device geometry belongs to ECUAL/configuration.
 
-Application:
+Examples:
 
-```c
-indication_service_set(..., true);
+```text
+SSD1306: 128 x 64
+W25Q64: 8 MiB, 256-byte pages, 4 KiB sectors
 ```
 
-không nên:
+Application should not construct raw bus frames.
 
-```c
-gpio_write(LOW); /* because LED active-low */
-```
+## 22. Build-Time Configuration
 
-## 21. External-device geometry
+Use `config/` for:
 
-W25Q page/sector geometry thuộc ECUAL.
+- baud rate;
+- timeout;
+- buffer size;
+- debounce interval;
+- bus speed;
+- PWM rate;
+- sample rate;
+- threshold;
+- external-device address.
 
-Địa chỉ sector nào Application được phép erase là Application/product config concern.
+Compile-time validation should reject impossible values.
 
-Tương tự:
+## 23. Dependency Checker Limitations
 
-- sensor register map → ECUAL,
-- alarm threshold → Service/Application.
+The checker validates includes, not behavior.
 
-## 22. Build-time configuration
+It cannot detect:
 
-Config nên có validation:
+- races;
+- incorrect register bits;
+- ISR latency;
+- bad clock math;
+- electrical problems;
+- hidden coupling through globals.
 
-```c
-#if VALUE == 0
-#error ...
-#endif
-```
+Architecture review and hardware testing are still required.
 
-Dùng khi invalid config có thể phát hiện compile-time.
+## 24. Architectural Acceptance Checklist
 
-Không dùng magic literal rải nhiều tầng.
-
-## 23. Dependency checker limitations
-
-Checker dựa trên include path/header index. Nó không phát hiện mọi architecture violation, ví dụ:
-
-- copy/paste raw address literal vào Application,
-- function pointer callback upward mà không include trực tiếp,
-- duplicated declaration,
-- global extern không qua header.
-
-Code review vẫn bắt buộc.
-
-## 24. Architectural acceptance checklist
-
-Trước merge module:
-
-- [ ] Application không biết pin/peripheral.
-- [ ] Service không truy cập register.
-- [ ] BSP không gọi Application.
-- [ ] ECUAL không chứa product behavior.
-- [ ] MCAL không callback upward.
-- [ ] ISR bounded và không block.
-- [ ] Shared state có ownership rõ.
-- [ ] Clock source/units rõ.
-- [ ] Error semantics rõ.
-- [ ] `make check-layers` pass.
-- [ ] README/porting docs cập nhật.
+- [ ] Application has no low-level includes.
+- [ ] Services contain no register access.
+- [ ] BSP owns board mapping.
+- [ ] ECUAL owns external-device protocol.
+- [ ] MCAL owns generic peripheral behavior.
+- [ ] Platform owns register/core definitions.
+- [ ] ISR belongs to the lowest owner.
+- [ ] ISR work is bounded.
+- [ ] thread handoff is explicit.
+- [ ] shared state ownership is clear.
+- [ ] clocks are translated below Application.
+- [ ] errors are observable.
+- [ ] `make check-layers` passes.
