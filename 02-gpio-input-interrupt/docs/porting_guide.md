@@ -1,115 +1,104 @@
 # Porting Guide — 02-gpio-input-interrupt
 
-## 1. Đổi button sang pin khác cùng STM32F103
+## 1. Moving the Button to Another Pin on STM32F103
 
-Cập nhật `board_pins.h`:
+Update together:
+
+- BSP port;
+- pin;
+- active level;
+- EXTI line;
+- AFIO mapping;
+- IRQ mapping if the line moves to a grouped handler.
+
+Do not change Application.
+
+## 2. Changing Polarity
+
+For an active-high button:
+
+- choose an appropriate pull-down/bias;
+- change active level;
+- configure rising edge instead of falling edge if desired.
+
+Button Service can remain unchanged.
+
+## 3. Using an External Pull-Up
+
+Configure the GPIO as a suitable input mode without the internal pull-up.
+
+Keep the physical idle level stable.
+
+## 4. Changing Debounce
+
+Change:
 
 ```c
-BOARD_USER_BUTTON_PORT
-BOARD_USER_BUTTON_PIN
-BOARD_USER_BUTTON_ACTIVE_LEVEL
-BOARD_USER_BUTTON_EXTI_LINE
-BOARD_USER_BUTTON_IRQ_PRIORITY
+BUTTON_SERVICE_DEBOUNCE_TIME_MS
 ```
 
-Pin number và EXTI line phải tương ứng nếu dùng mapping trực tiếp.
+Do not replace the timestamp algorithm with a blocking delay.
 
-Ví dụ PB8:
+## 5. Changing IRQ Priority
+
+Review the full interrupt-priority plan.
+
+Higher priority does not permit longer ISR work.
+
+## 6. Porting to Another STM32F1
+
+Verify:
+
+- AFIO register layout;
+- EXTI line mapping;
+- NVIC IRQ number;
+- GPIO register differences;
+- startup vector.
+
+## 7. Porting to Another MCU Family
+
+Preserve:
 
 ```text
-GPIO port = B
-pin = 8
-EXTI line = 8
-IRQ = EXTI9_5
+raw edge -> Button Service -> Event Service -> Application
 ```
 
-MCAL generic sẽ tự map grouped IRQ dựa trên line.
+Replace BSP/MCAL/Platform implementation.
 
-## 2. Đổi polarity
+## 8. Verification Checklist
 
-Nếu button nối 3.3 V khi nhấn:
+- [ ] idle input level stable;
+- [ ] correct edge produces interrupt;
+- [ ] pending flag clears;
+- [ ] raw edge reaches Button Service;
+- [ ] 30 ms debounce works;
+- [ ] one press creates one logical event;
+- [ ] LED toggles through Indication Service.
 
-- đổi pull xuống,
-- active level thành HIGH,
-- trigger thành rising.
+## 9. GDB Checklist
 
-Hiện `board_button_init()` hard-code `MCAL_EXTI_TRIGGER_FALLING`, nên port active-high phải sửa BSP, không chỉ macro.
-
-## 3. Dùng pull-up ngoài
-
-Có thể cấu hình input floating thay vì input pull nếu board có điện trở ngoài. Quyết định này thuộc BSP.
-
-## 4. Thay debounce
-
-`BUTTON_SERVICE_DEBOUNCE_TIME_MS` thuộc Service vì đây là policy xử lý tín hiệu chứ không phải register setting.
-
-Khi đổi giá trị, test:
-
-- click nhanh,
-- giữ nút,
-- bounce mạnh,
-- EMI/noise nếu dây dài.
-
-## 5. Đổi IRQ priority
-
-Priority hợp lệ trong implementation: 0..15, được shift vào NVIC priority byte. Xem xét quan hệ với UART/DMA IRQ nếu ghép nhiều module vào một firmware.
-
-## 6. Port sang STM32F1 khác
-
-Rà:
-
-- AFIO/EXTI register layout,
-- IRQ number,
-- NVIC implemented priority bits,
-- GPIO input pull semantics,
-- linker memory.
-
-## 7. Port sang family khác
-
-Một số family mới dùng SYSCFG thay AFIO cho EXTI mapping. Khi đó:
-
-- giữ Board Button API,
-- thay MCAL EXTI,
-- thay Platform device mapping,
-- Application/Button Service giữ nguyên.
-
-## 8. Verification checklist
-
-- pin released đọc inactive level,
-- pin pressed đọc active level,
-- EXTI pending clear đúng,
-- handler đúng vector,
-- press event chỉ xuất hiện một lần,
-- debounce chạy ngoài ISR,
-- layer checker pass.
-
-## 9. GDB checklist
+Break at:
 
 ```gdb
 break EXTI0_IRQHandler
-break button_service_take_press
-continue
+break button_service_process
+break application_process
 ```
 
-Nếu đổi sang line 8, breakpoint phải là:
+Inspect raw pending state and Service event state.
 
-```gdb
-break EXTI9_5_IRQHandler
-```
+## 10. Logic Analyzer/Oscilloscope
 
-## 10. Logic analyzer/oscilloscope
+Probe PA0.
 
-Nếu cần xác minh bounce:
+You should see multiple fast bounce transitions but only one logical toggle.
 
-- probe PA0,
-- quan sát nhiều edge trong vài ms,
-- so sánh với chỉ một semantic press ở Application.
+## 11. Common Mistakes
 
-## 11. Sai lầm thường gặp
-
-- đổi GPIO nhưng quên AFIO EXTI mapping,
-- clear pending sai semantics,
-- debounce bằng delay trong ISR,
-- callback từ ISR lên Application,
-- quên common ground,
-- dùng pin đã bị debug/JTAG/peripheral khác chiếm.
+- wrong AFIO port mapping;
+- wrong EXTI line;
+- missing pull resistor;
+- wrong active polarity;
+- clearing EXTI incorrectly;
+- performing debounce in ISR;
+- letting Application access EXTI directly.

@@ -1,95 +1,92 @@
 # Porting Guide — 05-timer-pwm
 
-## 1. Đổi pin/channel cùng timer
+## 1. Changing Pin/Channel on the Same Timer
 
-Kiểm tra alternate-function mapping của STM32F103. Không phải mọi GPIO đều map được TIM2_CH1 nếu không remap.
+Select a valid TIM2 channel/pin mapping.
 
-Cập nhật:
+Update BSP and, if required, channel-specific MCAL operations.
 
-```text
-bsp/bluepill/include/board_pins.h
-bsp/bluepill/src/board_pwm.c
-```
+## 2. Moving to Another Timer
 
-Nếu cần AFIO remap, bổ sung BSP/MCAL support.
+Review:
 
-## 2. Đổi sang timer khác
+- base address;
+- RCC enable;
+- APB bus;
+- timer input clock;
+- channel register mapping;
+- IRQ only if needed.
 
-Cần:
+## 3. Changing PWM Frequency
 
-- base address,
-- RCC enable bit,
-- timer instance enum/mapping,
-- channel-specific CCMR/CCER/CCR,
-- actual timer input clock bus.
-
-TIM2/3/4 nằm APB1; TIM1 nằm APB2 và có advanced-timer differences.
-
-## 3. Đổi PWM frequency
-
-Sửa:
+Change:
 
 ```c
 BOARD_PWM_FREQUENCY_HZ
 ```
 
-Contract hiện tại yêu cầu:
+Verify:
 
 ```text
-BOARD_PWM_TIMER_TICK_HZ % BOARD_PWM_FREQUENCY_HZ == 0
+timer_tick % pwm_frequency == 0
 ```
 
-Nếu cần frequency không chia hết, mở rộng algorithm chọn PSC/ARR với error minimization.
+and the resulting period fits the timer width.
 
-## 4. Đổi timer resolution
+## 4. Changing Timer Resolution
 
-`BOARD_PWM_TIMER_TICK_HZ` quyết định count resolution. Higher tick:
+Changing the 1 MHz timer tick affects:
 
-- resolution tốt hơn,
-- có thể tăng requirement clock,
-- ARR lớn hơn.
+- prescaler;
+- period resolution;
+- maximum representable period.
 
-Phải giữ PSC/ARR trong 16-bit range của timer implementation.
+Validate all ranges.
 
-## 5. Đổi fade speed
+## 5. Changing Fade Speed
 
-Application config:
+Adjust:
 
-```c
+```text
 APPLICATION_PWM_UPDATE_PERIOD_MS
 APPLICATION_PWM_STEP_PERMILLE
 ```
 
-Không cần sửa timer waveform frequency.
+Approximate one-way ramp:
 
-## 6. Active-low PWM
+```text
+1000 / step * update_period
+```
 
-Nếu load active-low, có thể:
+## 6. Active-Low PWM
 
-- đảo output polarity bằng CCER nếu driver hỗ trợ,
-- hoặc map semantic duty ở BSP/Service.
+Handle electrical polarity in BSP/MCAL output configuration.
 
-Không nên tự `1000-duty` rải rác trong Application nếu board polarity là hardware concern.
+Keep logical duty semantics unchanged.
 
-## 7. Port sang family khác
+## 7. Porting to Another MCU Family
 
-Giữ PWM Service/Application, thay timer MCAL/register map/BSP.
+Keep Application/PWM Service.
 
-## 8. Validation checklist
+Replace timer/GPIO MCAL and Platform Device.
 
-- đo SCK? Không, đo trực tiếp PWM PA0,
-- frequency đúng,
-- 0/50/100% đúng,
-- no glitches đáng kể khi update,
-- HSI fallback vẫn đúng frequency,
-- `TIM2_IRQHandler` weak,
-- layer checker pass.
+Re-check the timer-clock rule because another family may differ from STM32F1.
 
-## 9. Common pitfalls
+## 8. Validation Checklist
 
-- quên timer x2 clock,
-- ARR off-by-one,
-- CCR 100% xử lý sai,
-- preload không generate UG lúc init,
-- pin không đúng AF,
-- update duty bằng delay blocking.
+- [ ] timer clock derived correctly;
+- [ ] carrier frequency correct;
+- [ ] 0% and 100% correct;
+- [ ] duty updates smoothly;
+- [ ] preload works;
+- [ ] no unnecessary timer interrupt;
+- [ ] HSI fallback still produces correct frequency if retained.
+
+## 9. Common Pitfalls
+
+- ignoring APB timer x2;
+- using wrong channel/pin;
+- ARR off by one;
+- period outside 16-bit range;
+- changing clock tree without recalculating timer setup;
+- leaking timer details into Application.

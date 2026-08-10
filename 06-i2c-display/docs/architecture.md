@@ -1,113 +1,105 @@
-# Kiến trúc — 06-i2c-display
+# Architecture — 06-i2c-display
 
-## 1. Dependency graph
+## 1. Dependency Graph
 
 ```text
 Application
-   ├───────────────> Time Service
-   │                    ↓
-   │                Board Timebase
-   │                    ↓
-   │                MCAL SysTick
-   │
-   └───────────────> Display Service
-                       ├────────> SSD1306 ECUAL
-                       │             ↑ transport callbacks
-                       └────────> Board Display Bus
-                                      ↓
-                                 MCAL I2C + GPIO
-                                      ↓
-                                    Platform
+    |
+Display Service
+   / \
+  /   \
+SSD1306 ECUAL   Board Display Bus
+                    |
+                MCAL I2C/GPIO
+
+Application
+    |
+Time Service -> Board Timebase -> MCAL SysTick
 ```
 
-## 2. Vì sao Service là composition point
+## 2. Why the Service Is the Composition Point
 
-Theo layer checker:
+The Service knows both:
 
-```text
-ECUAL không được include BSP
-BSP không được include ECUAL
-Service được phép phụ thuộc cả hai
-```
+- the logical display API;
+- the board transport callbacks required to initialize SSD1306.
 
-Do đó `display_service_init()` tạo `ssd1306_transport_t` từ BSP callbacks và truyền xuống ECUAL.
+ECUAL remains independent from BSP.
 
-Đây là dependency inversion đơn giản mà không cần heap/object framework.
-
-## 3. Ownership table
+## 3. Ownership Table
 
 | Concern | Owner |
 |---|---|
-| UI content/progress | Application |
-| Display-facing semantic API | Display Service |
-| SSD1306 protocol/commands/framebuffer | ECUAL |
-| OLED I2C control byte/address | BSP Display Bus |
-| PB6/PB7/I2C1 mapping | BSP |
-| START/ADDR/TXE/BTF/STOP | MCAL I2C |
-| 100 ms UI schedule | Time Service/Application |
-| 100 ms power-on settle | BSP/MCAL busy delay |
+| screen content | Application |
+| logical draw/present API | Display Service |
+| framebuffer/controller | SSD1306 ECUAL |
+| I2C control byte/address | Board Display Bus |
+| I2C protocol registers | MCAL I2C |
+| PB6/PB7 | BSP |
+| register layout | Platform Device |
 
-## 4. Initialization timing nuance
+## 4. Initialization Timing Nuance
 
-Global IRQ bị disable trước `system_init()`. Vì display init nằm trong `system_init()`, power-on delay không thể dựa vào SysTick ISR.
+Global IRQ is disabled during `system_init()`.
 
-Architecture tách:
+The OLED power-on delay therefore uses an IRQ-independent busy delay.
 
-```text
-init delay: busy NOP MCAL delay
-runtime schedule: SysTick Time Service
-```
+After global IRQ is enabled, SysTick provides normal runtime timing.
 
-Điều này cần nhớ khi thêm bất kỳ peripheral init nào đòi delay trước global IRQ enable.
+## 5. I2C Polling Semantics
 
-## 5. I2C polling semantics
+Each transaction returns success/failure synchronously.
 
-Không có I2C ISR. MCAL polling có bounded loop để tránh treo vĩnh viễn nếu flag không đến.
+Waits are bounded by `MCAL_I2C_POLL_TIMEOUT_CYCLES`.
 
-Upper layer chỉ nhận `bool`, không biết SR1/SR2.
+No I2C ISR can call upward.
 
-## 6. Framebuffer ownership
+## 6. Framebuffer Ownership
 
-`ssd1306.c` sở hữu static framebuffer 1024 byte. Application không giữ raw pixel buffer và chỉ gọi draw methods.
+The 1024-byte framebuffer belongs to ECUAL.
 
-Điều này giữ rendering state trong device abstraction.
+Application never sees page/bit layout.
 
-## 7. Runtime update flow
+This keeps drawing code independent from I2C transactions.
+
+## 7. Runtime Update Flow
 
 ```text
-Application periodic due
- → advance progress
- → clear framebuffer
- → draw text/progress
- → display_service_present
- → ssd1306_update
- → command addressing
- → I2C data stream 1024 bytes
+100 ms due
+    |
+Application updates logical content
+    |
+Display Service
+    |
+ECUAL modifies framebuffer
+    |
+present()
+    |
+Board bus
+    |
+MCAL I2C transaction
 ```
 
-## 8. Failure model
+## 8. Failure Model
 
-Transport returns `false` → ECUAL return false → Service return false → Application ghi error và disable further updates.
+Initialization failure propagates to `system_panic()`.
 
-Init failure propagate tới panic.
+Runtime update failure is recorded in Application diagnostics and further
+updates stop.
 
-## 9. Layer boundary benefits
+## 9. Layer Boundary Benefits
 
-Đổi OLED sang device khác:
+The same SSD1306 driver can use another board transport.
 
-- Application có thể giữ logic nếu Display Service contract giữ,
-- ECUAL thay driver,
-- BSP I2C có thể tái sử dụng.
+The same Application-facing display Service can later wrap another controller
+with minimal Application changes.
 
-Đổi I2C1 sang I2C2:
+## 10. Extension Notes
 
-- ECUAL không đổi,
-- Application không đổi.
+Keep:
 
-## 10. Extension notes
+- graphics/controller logic in ECUAL;
+- bus electrical/peripheral logic in BSP/MCAL;
+- screen policy in Application.
 
-Nếu thêm asynchronous I2C:
-
-- transport contract hiện synchronous bool; cần thiết kế lại state/callback/event,
-- không gọi Application callback từ ISR,
-- có thể Service poll transaction state.
+Avoid leaking raw I2C flags upward.

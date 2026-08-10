@@ -1,127 +1,108 @@
-# Kiến trúc — 03-uart-polling
+# Architecture — 03-uart-polling
 
-## 1. Dependency graph
+## 1. Dependency Graph
 
 ```text
 Application
-    ↓
-Serial Service
-    ↓
+    |
+UART Service
+    |
 Board UART
-    ↓
-MCAL USART
-    ├─ MCAL GPIO
-    └─ MCAL RCC
-    ↓
-Platform STM32F103
+    |
+MCAL USART + GPIO
+    |
+Platform Device
 ```
 
-## 2. Trách nhiệm
+## 2. Responsibilities
 
-| Module | Trách nhiệm |
-|---|---|
-| Application | Greeting + echo policy + debug counters |
-| Serial Service | API byte-oriented portable |
-| Board UART | USART instance, pin mapping, baud config |
-| MCAL USART | Register setup, RX/TX polling, error capture |
-| MCAL GPIO | PA9/PA10 mode |
-| MCAL RCC | Clock setup, APB2 clock |
-| Platform | USART1 base/register/bit definitions |
-| System | Composition/init/super-loop |
+Application owns greeting and echo policy.
 
-## 3. Public contract
+Service exposes byte operations.
 
-Service API:
+BSP owns PA9/PA10 and USART1 mapping.
+
+MCAL owns USART/GPIO registers and baud calculation.
+
+Platform Device owns base addresses and bit definitions.
+
+## 3. Public Contract
+
+The upper-layer contract is non-blocking:
 
 ```c
-bool serial_service_try_read_byte(uint8_t *byte);
-bool serial_service_try_write_byte(uint8_t byte);
-uint32_t serial_service_take_error_flags(void);
+bool try_read(...);
+bool try_write(...);
 ```
 
-`try_*` có contract "không chờ". Điều này ảnh hưởng trực tiếp đến Application state design.
+`false` means the operation did not complete now.
 
-## 4. Polling ownership
+## 4. Polling Ownership
 
-MCAL sở hữu hardware readiness:
+Only MCAL inspects USART status bits such as RXNE/TXE.
+
+Application never polls a register.
+
+## 5. Error Handoff
+
+This baseline example intentionally keeps detailed UART errors out of the
+public API.
+
+A richer Service could expose error counters without moving register bits
+upward.
+
+## 6. No Interrupt Concurrency
+
+USART1 is entirely thread-driven.
+
+There is no ISR/thread race for UART state in this example.
+
+That makes it the clean baseline before Example 04.
+
+## 7. Timing Dependency
+
+BRR depends on the actual APB2 clock.
+
+The RCC/Board layer provides the real peripheral clock, including HSI fallback.
+
+## 8. Initialization Dependency
 
 ```text
-RXNE
-TXE
-PE/FE/NE/ORE
+RCC clock
+    |
+GPIO + USART1
+    |
+Service
+    |
+Application
 ```
 
-Application chỉ nhận `bool` và portable error flags.
+Application cannot send the greeting before UART initialization is complete.
 
-## 5. Error handoff
+## 9. Layer Boundary
 
-Hardware flags:
+Application knows:
 
 ```text
-USART_SR
-  ↓
-portable_error_flags()
-  ↓
-g_error_flags[instance]
-  ↓
-mcal_usart_take_error_flags()
-  ↓
-Board UART
-  ↓
-Serial Service
-  ↓
-Application counters
+byte input
+byte output
 ```
 
-`take` semantics read-and-clear accumulated software state.
-
-## 6. Không có interrupt concurrency
-
-USART path không có shared RX/TX state giữa ISR và thread mode. Vì vậy architecture đơn giản hơn Example 04:
-
-- không NVIC,
-- không ring index,
-- không critical section TX start,
-- không overflow counter phần mềm.
-
-## 7. Timing dependency
-
-Throughput phụ thuộc tần suất super-loop gọi `application_process()`. Nếu thêm task blocking vào Application, UART polling dễ bị overrun.
-
-Do đó "non-blocking upper-layer design" là yêu cầu hệ thống, không chỉ style.
-
-## 8. Initialization dependency
-
-Board cần tính clock trước UART:
+It does not know:
 
 ```text
-RCC setup
- → get APB2 clock
- → board_uart_init
- → mcal_usart_init
+PA9
+PA10
+USART1
+SR
+DR
+BRR
+PCLK2
 ```
 
-Sai clock input dẫn tới sai baud dù USART register sequence đúng.
+## 10. Failure Path
 
-## 9. Layer boundary
+Invalid board/MCAL initialization returns failure upward where supported.
 
-Đổi USART1 sang USART2 lý tưởng chỉ tác động:
-
-- BSP,
-- MCAL instance mapping,
-- platform register/clock bit,
-- clock source APB tương ứng.
-
-Application/Serial Service không đổi.
-
-## 10. Failure path
-
-`board_uart_init()` false:
-
-```text
-board_init false
- → system_init false
- → system_panic
-```
-
-Configuration error được fail sớm thay vì chạy UART với divider invalid.
+Runtime "not ready" is not a fatal error; it is represented by a `false`
+non-blocking result.

@@ -1,28 +1,25 @@
 # 07-spi-memory — SPI1 + W25Q64 NOR Flash
 
-Example này điều khiển **W25Q64 64-Mbit (8 MiB)** qua **SPI1** bằng register-level polling. Firmware đọc JEDEC ID, xóa sector cuối 4 KiB, program 32 byte test pattern, đọc lại và verify từng byte. Khi test pass, LED PC13 toggle mỗi 500 ms; nếu erase/program/verify fail sau khi memory init đã thành công, LED giữ sáng.
+## 1. Learning Objectives
 
-> **Cảnh báo:** đây là demo destructive. Sector cuối `0x007FF000..0x007FFFFF` bị erase mỗi lần reset.
+This example adds a register-level SPI bus and a W25Q64-compatible NOR flash
+driver.
 
-## 1. Mục tiêu học tập
+You will learn:
 
-Example minh họa:
-
-- SPI master full-duplex,
-- GPIO AF cho SCK/MOSI và floating input cho MISO,
-- software-controlled chip select,
-- chọn baud prescaler theo PCLK2 và max SPI clock,
-- polling `TXE`, `RXNE`, `BSY`,
-- giao thức command/response của SPI NOR,
-- JEDEC ID,
-- Status Register-1 `BUSY`/`WEL`,
-- Write Enable trước program/erase,
-- 24-bit address,
-- 256-byte page boundary,
-- 4 KiB sector erase,
-- bounded busy polling,
-- ECUAL W25Q64 với transport callbacks,
-- destructive self-test và GDB diagnostics.
+- SPI1 mode 0 configuration;
+- PA4 software chip select;
+- PA5/PA6/PA7 SCK/MISO/MOSI mapping;
+- register-level SPI baud-prescaler selection;
+- bounded TXE/RXNE/BSY polling;
+- W25Q64 JEDEC identification;
+- Write Enable and Status Register-1;
+- BUSY polling;
+- 4 KiB Sector Erase;
+- Page Program restrictions;
+- read-back verification;
+- ECUAL transport composition;
+- startup-safe polling while global IRQ is disabled.
 
 ## 2. Wiring
 
@@ -37,373 +34,339 @@ PA6         ------  D1 / DO / MISO
 PA7         ------  D0 / DI / MOSI
 ```
 
-Mapping quan trọng:
+Important mapping:
 
 ```text
 D1 = DO = MISO = PA6
 D0 = DI = MOSI = PA7
 ```
 
-Dùng 3.3 V logic và common ground.
+Use 3.3 V power and logic.
 
-## 3. Expected behavior
+## 3. Expected Behavior
 
-Startup test:
+At startup the firmware:
 
-```text
-Read JEDEC ID
-    ↓
-verify manufacturer/capacity
-    ↓
-erase sector 0x007FF000
-    ↓
-wait BUSY=0
-    ↓
-page program 32 bytes
-    ↓
-wait BUSY=0
-    ↓
-read 32 bytes
-    ↓
-byte-by-byte verify
-```
+1. configures the board clock and SPI bus;
+2. waits for the memory power rail to settle;
+3. reads the W25Q64 JEDEC ID;
+4. validates the manufacturer/capacity;
+5. erases the last 4 KiB sector;
+6. programs a 32-byte test pattern;
+7. reads the 32 bytes back;
+8. verifies them byte-for-byte.
 
-Pass:
+If the test passes:
 
 ```text
 PC13 toggles every 500 ms
 ```
 
-Runtime test failure:
+If erase/program/read-back verification fails after the device is identified:
 
 ```text
-PC13 steady ON
+PC13 remains ON
 ```
 
-Nếu JEDEC init fail, `system_init()` fail và firmware đi vào `system_panic()` trước Application test.
+If memory initialization/JEDEC validation fails, `system_init()` fails and the
+firmware enters `system_panic()`.
 
-## 4. W25Q64 geometry trong driver
-
-```c
-#define W25Q64_SIZE_BYTES        (8388608UL)
-#define W25Q64_PAGE_SIZE_BYTES   (256U)
-#define W25Q64_SECTOR_SIZE_BYTES (4096UL)
-```
-
-Address range:
+## 4. W25Q64 Geometry in the Driver
 
 ```text
-0x000000 .. 0x7FFFFF
+capacity: 8 MiB
+address range: 0x000000 .. 0x7FFFFF
+page size: 256 bytes
+sector size: 4096 bytes
 ```
 
-Test sector:
+Demo sector:
 
-```c
-#define MEMORY_DEMO_TEST_SECTOR_ADDRESS (0x007FF000UL)
+```text
+0x007FF000 .. 0x007FFFFF
 ```
 
-Test length:
-
-```c
-#define MEMORY_DEMO_TEST_LENGTH (32U)
-```
+**Warning:** this sector is erased once on every reset.
 
 ## 5. JEDEC ID
 
-Driver command:
+Command:
 
 ```text
-0x9F = JEDEC ID
+0x9F
 ```
 
-Đọc 3 byte:
+The driver reads three bytes:
 
 ```text
-manufacturer_id
-memory_type
-capacity_id
+manufacturer
+memory type
+capacity
 ```
 
-Driver yêu cầu:
+Expected manufacturer/capacity:
 
 ```text
 manufacturer = 0xEF
 capacity     = 0x17
 ```
 
-`memory_type` được lưu lại nhưng không ép bằng một giá trị duy nhất, giúp example linh hoạt hơn giữa revision thuộc W25Q64 class.
-
-Với module đã test phổ biến:
+A common W25Q64 result is:
 
 ```text
 EF 40 17
 ```
 
-## 6. SPI configuration
+The memory-type byte is recorded for debugging.
 
-`config/board_config.h`:
+## 6. SPI Configuration
+
+SPI1 runs as:
+
+```text
+master
+full duplex
+8-bit frames
+MSB first
+CPOL = 0
+CPHA = 0
+software NSS
+```
+
+This is SPI mode 0.
+
+The MCAL enables SPI1 through APB2 and configures CR1 directly.
+
+## 7. SPI Clock Selection
+
+Configuration:
 
 ```c
 #define BOARD_MEMORY_SPI_MAX_HZ (5000000UL)
 ```
 
-SPI:
+MCAL chooses the smallest power-of-two SPI divider that does not exceed the
+requested maximum.
+
+At normal clock:
 
 ```text
-Peripheral: SPI1
-Mode:       0
-CPOL:       0
-CPHA:       0
-Frame:      8 bit
-Bit order:  MSB first
-NSS:        software
-CS:         PA4 GPIO
+PCLK2 = 72 MHz
+divider = /16
+SPI = 4.5 MHz
 ```
 
-MCAL set:
-
-```text
-CR1.MSTR = 1
-CR1.SSM  = 1
-CR1.SSI  = 1
-CR1.BR   = selected prescaler
-CR1.SPE  = 1
-```
-
-Mode 0 giữ `CPOL=0`, `CPHA=0`.
-
-## 7. SPI clock selection
-
-MCAL duyệt divisor:
-
-```text
-/2, /4, /8, /16, /32, /64, /128, /256
-```
-
-và chọn divisor nhỏ nhất sao cho rounded-up SPI clock không vượt `BOARD_MEMORY_SPI_MAX_HZ`.
-
-Với PCLK2 72 MHz:
-
-```text
-/8  = 9 MHz   > 5 MHz
-/16 = 4.5 MHz <= 5 MHz
-```
-
-Nên SPI chạy 4.5 MHz.
-
-HSI fallback:
+At 8 MHz HSI fallback:
 
 ```text
 PCLK2 = 8 MHz
-/2 = 4 MHz <= 5 MHz
+divider = /2
+SPI = 4 MHz
 ```
 
-## 8. Chip select
+## 8. Chip Select
 
-CS là GPIO PA4, không dùng hardware NSS.
+PA4 is a normal push-pull GPIO controlled by BSP.
+
+Idle state:
+
+```text
+CS = HIGH
+```
 
 Transaction:
 
 ```text
 CS LOW
-  ↓
-command/header/data
-  ↓
-wait SPI BSY=0
-  ↓
+command/address/data
 CS HIGH
 ```
 
-BSP preload CS HIGH trước/đồng thời cấu hình output để tránh chọn flash ngoài ý muốn trong init.
+The GPIO configuration path preloads the desired output level before switching
+the pin into output mode, avoiding an unwanted active-low CS glitch during
+initialization.
 
-## 9. SPI transfer primitive
+## 9. SPI Transfer Primitive
 
-`mcal_spi_transfer()` hỗ trợ:
-
-```c
-tx != NULL, rx == NULL  → transmit, discard received byte
-tx == NULL, rx != NULL  → transmit 0xFF dummy, collect RX
-tx != NULL, rx != NULL  → full-duplex exchange
-```
-
-Mỗi byte:
+For each byte:
 
 ```text
 wait TXE
-DR = tx/dummy
+    |
+write DR
+    |
 wait RXNE
-rx = DR
+    |
+read DR
 ```
 
-Cuối transfer:
+For receive-only bytes, the MCAL transmits dummy `0xFF`.
+
+After the final byte:
 
 ```text
-wait BSY = 0
+wait BSY == 0
 ```
 
-Polling có `MCAL_SPI_POLL_TIMEOUT_CYCLES` để tránh treo vĩnh viễn nếu peripheral không đạt trạng thái yêu cầu.
+Every status wait is bounded by:
 
-## 10. W25Q64 command set dùng trong demo
-
-```text
-0x9F  JEDEC ID
-0x05  Read Status Register-1
-0x06  Write Enable
-0x03  Read Data
-0x02  Page Program
-0x20  4 KiB Sector Erase
+```c
+MCAL_SPI_POLL_TIMEOUT_CYCLES
 ```
 
-Không dùng Quad SPI; chỉ standard SPI 1-1-1.
+## 10. W25Q64 Command Set Used by the Demo
+
+| Operation | Command |
+|---|---:|
+| Write Enable | `0x06` |
+| Read Status Register-1 | `0x05` |
+| Read Data | `0x03` |
+| Page Program | `0x02` |
+| 4 KiB Sector Erase | `0x20` |
+| JEDEC ID | `0x9F` |
 
 ## 11. Status Register-1
 
-Driver dùng:
-
-```text
-bit 0 BUSY
-bit 1 WEL
-```
-
 ### BUSY
 
-Sau program/erase, flash tự thực hiện internal operation. SPI command đã gửi xong không có nghĩa dữ liệu đã hoàn tất. Driver poll `0x05` tới khi:
+Bit 0 indicates an internal program/erase operation is still active.
 
-```text
-BUSY = 0
-```
+The ECUAL repeatedly reads Status Register-1 until BUSY clears or the configured
+poll limit is reached.
 
 ### WEL
 
-Trước operation thay đổi flash:
+Bit 1 is the Write Enable Latch.
+
+Before erase/program:
 
 ```text
-send 0x06 Write Enable
-read Status-1
-verify WEL = 1
+Write Enable command
+    |
+read Status Register-1
+    |
+WEL set?
 ```
 
-Nếu WEL không set, operation không được tiếp tục.
+If WEL is not set, the operation fails.
 
-## 12. Bounded polling
+## 12. Bounded Polling
 
-`config/service_config.h`:
+Because global interrupts are disabled during `system_init()`, the W25Q64 driver
+does **not** depend on SysTick for erase/program completion.
+
+It uses bounded poll counts:
 
 ```c
-#define W25Q64_READY_POLL_LIMIT        (10000UL)
-#define W25Q64_PAGE_PROGRAM_POLL_LIMIT (100000UL)
-#define W25Q64_SECTOR_ERASE_POLL_LIMIT (1000000UL)
+#define W25Q64_READY_POLL_LIMIT          (10000UL)
+#define W25Q64_PAGE_PROGRAM_POLL_LIMIT   (100000UL)
+#define W25Q64_SECTOR_ERASE_POLL_LIMIT   (1000000UL)
 ```
 
-Đây là **số lần poll**, không phải millisecond timeout.
+This keeps initialization safe before global IRQ enable.
 
-Lý do: erase/program test chạy trong `application_init()` khi `main()` vẫn giữ global IRQ disabled. Không thể dựa vào SysTick tick để đo timeout ở thời điểm này.
+The 10 ms memory power-on settling delay also uses an IRQ-independent MCAL busy
+delay.
 
-## 13. Page Program rules
+## 13. Page Program Rules
 
-`w25q64_page_program()` validate:
+The driver validates:
 
-- `data != NULL`,
-- `length > 0`,
-- `length <= 256`,
-- address range hợp lệ,
-- request không vượt page boundary.
+- non-null data;
+- length > 0;
+- length <= 256;
+- address range valid;
+- write does not cross a 256-byte page boundary.
 
-Page offset:
-
-```text
-address % 256
-```
-
-Condition:
-
-```text
-page_offset + length <= 256
-```
-
-Điều này tránh page-wrap behavior không mong muốn.
-
-## 14. Sector erase rules
-
-`w25q64_sector_erase(address)` align xuống sector:
-
-```text
-address -= address % 4096
-```
-
-Sau đó:
+Conceptually:
 
 ```text
 wait ready
-write enable
-0x20 + A23..A0
-CS high
+    |
+Write Enable
+    |
+verify WEL
+    |
+CS LOW
+0x02 + 24-bit address + data
+CS HIGH
+    |
 poll BUSY
 ```
 
-## 15. Read transaction
+## 14. Sector Erase Rules
+
+The requested address is aligned down to a 4 KiB sector boundary.
+
+Sequence:
 
 ```text
-CS low
+wait ready
+Write Enable
+verify WEL
+send 0x20 + 24-bit address
+poll BUSY
+```
+
+The demo deliberately erases the final sector.
+
+## 15. Read Transaction
+
+```text
+CS LOW
 0x03
-A23 A15 A7
-dummy clocks while receiving data
-CS high
+A23..A16
+A15..A8
+A7..A0
+dummy clocks -> data bytes
+CS HIGH
 ```
 
-Trong implementation:
+The ECUAL validates that the requested range stays inside the 8 MiB device.
+
+## 16. ECUAL Transport
+
+The W25Q64 ECUAL receives a generic transport:
 
 ```text
-header[4] = command + 3 address bytes
-transfer(header)
-transfer(NULL, data, length)  // sends 0xFF dummy
-```
-
-## 16. ECUAL transport
-
-`w25q64_transport_t`:
-
-```c
-transfer(...)
+transfer()
 select()
 deselect()
 ```
 
-Memory Service tạo struct callback từ Board Memory Bus và truyền vào `w25q64_init()`.
+The Memory Service composes those callbacks from BSP.
 
-Do đó W25Q64 driver không include:
+Therefore the W25Q64 driver does not include BSP/MCAL/Platform headers.
 
-- `mcal_spi.h`,
-- `board_pins.h`,
-- `stm32f103xb.h`.
+## 17. Application Self-Test
 
-## 17. Application self-test
+Configured test:
 
-Pattern 32 byte bắt đầu:
-
-```text
-0x53 = 'S'
+```c
+#define MEMORY_DEMO_TEST_SECTOR_ADDRESS (0x007FF000UL)
+#define MEMORY_DEMO_TEST_LENGTH         (32U)
 ```
 
-và byte cuối:
+Sequence:
 
 ```text
-0xA5
-```
-
-Flow:
-
-```text
-memory_service_get_jedec_id()
 erase sector
-program pattern
-read back
-verify byte-by-byte
+    |
+program 32 bytes
+    |
+read 32 bytes
+    |
+compare every byte
 ```
 
-Nếu mismatch, Application lưu index đầu tiên.
+On success:
 
-## 18. Debug globals
+```text
+application_memory_test_sequence = 1
+application_memory_test_passed = true
+```
+
+## 18. Debug Globals
 
 ```gdb
 p/x application_memory_manufacturer_id
@@ -424,105 +387,67 @@ p/x application_memory_readback_first_byte
 p/x application_memory_readback_last_byte
 ```
 
-Pass điển hình:
+Successful read-back pattern:
 
 ```text
-manufacturer_id = 0xEF
-type_id         = 0x40
-capacity_id     = 0x17
-
-test_address    = 0x007FF000
-erase_ok        = true
-program_ok      = true
-verify_ok       = true
-test_passed     = true
-error_count     = 0
-
-readback_first  = 0x53
-readback_last   = 0xA5
-first_mismatch  = 0xFF
+first byte = 0x53
+last byte  = 0xA5
 ```
 
-## 19. LED indication
+## 19. LED Indication
 
-PC13 active-low:
-
-- test pass → toggle mỗi 500 ms,
-- Application test failure → steady ON.
-
-Heartbeat dùng Time Service sau khi global IRQ đã enable và super-loop chạy.
-
-## 20. Interrupt policy
-
-SPI là polling:
+Pass:
 
 ```text
-SPI1_IRQHandler = weak/default
+PC13 toggles every 500 ms
 ```
 
-SysTick strong cho heartbeat:
+Application-level test failure:
 
 ```text
-SysTick_Handler = strong
+PC13 steady ON
 ```
 
-Không có SPI ISR.
+Initialization failure:
 
-## 21. Kiến trúc
+```text
+system_panic()
+```
+
+## 20. Interrupt Policy
+
+SPI1 interrupts are not used.
+
+`SPI1_IRQHandler()` remains the weak default startup handler.
+
+SysTick is enabled only after `system_init()`; W25Q64 startup operations are
+therefore intentionally independent from SysTick.
+
+## 21. Architecture
 
 ```text
 Application
-   ├─> Memory Service
-   │      ├─> W25Q64 ECUAL
-   │      └─> Board Memory Bus
-   │              ├─> MCAL SPI
-   │              └─> MCAL GPIO
-   │
-   ├─> Indication Service → Board LED → MCAL GPIO
-   └─> Time Service → Board Timebase → MCAL SysTick
+    |
+Memory Service
+   / \
+  /   \
+W25Q64 ECUAL   Board Memory Bus
+                    |
+                MCAL SPI + GPIO
+                    |
+              Platform Device
 ```
 
+The Application also uses Time/Indication Services for the post-test heartbeat.
 
-## Build, flash và debug
-
-Yêu cầu công cụ:
-
-```text
-arm-none-eabi-gcc
-arm-none-eabi-objcopy
-arm-none-eabi-objdump
-arm-none-eabi-size
-GNU Make
-Python 3
-OpenOCD
-arm-none-eabi-gdb hoặc gdb-multiarch
-```
-
-Build:
+## Build, Flash, and Debug
 
 ```bash
 make check-layers
 make clean
 make
-```
-
-Các artifact chính:
-
-```text
-build/firmware.elf
-build/firmware.bin
-build/firmware.hex
-build/firmware.map
-build/firmware.lst
-```
-
-Flash:
-
-```bash
 make flash
 ```
-
-Debug bằng hai terminal:
 
 ```bash
 # Terminal 1
@@ -532,112 +457,87 @@ make debug-server
 make debug
 ```
 
-OpenOCD config dùng SWD, `reset_config none` và adapter speed 1000 kHz.
+## 22. Test Procedure
 
+1. Wire the module exactly as documented.
+2. Flash firmware.
+3. Inspect JEDEC ID.
+4. Confirm manufacturer `0xEF` and capacity `0x17`.
+5. Confirm erase/program/verify flags are true.
+6. Confirm error count is zero.
+7. Confirm first/last read-back bytes.
+8. Confirm PC13 heartbeat.
+9. Optionally capture SPI with a logic analyzer.
 
-Test JEDEC trước:
-
-```gdb
-p/x application_memory_manufacturer_id
-p/x application_memory_type_id
-p/x application_memory_capacity_id
-```
-
-Nếu muốn trace transaction:
-
-```gdb
-break w25q64_init
-break w25q64_sector_erase
-break w25q64_page_program
-continue
-```
-
-Không dùng breakpoint giữa erase busy polling nếu muốn đo timing thực.
-
-
-## 22. Test procedure
-
-1. Nối đúng 6 dây.
-2. Flash/reset.
-3. Quan sát PC13.
-4. Nếu heartbeat, mở GDB và xác nhận flags.
-5. Xác nhận JEDEC trước khi đánh giá erase/program.
-6. Có thể reset lại, nhưng nhớ mỗi reset erase lại sector cuối.
-
-## 23. Troubleshooting JEDEC
+## 23. JEDEC Troubleshooting
 
 ### `00 00 00`
 
-Thường kiểm tra:
+Check:
 
-- MISO/D1 bị kéo LOW,
-- wiring D1↔PA6,
-- nguồn/common ground,
-- CS waveform.
+- MISO/D1 connected to PA6;
+- module power;
+- common ground;
+- MISO not shorted low.
 
 ### `FF FF FF`
 
-Thường kiểm tra:
+Check:
 
-- MISO hở,
-- CS không xuống LOW,
-- device không được chọn/không có nguồn,
-- nhầm D0/D1.
+- CS actually goes LOW;
+- MISO is not open/floating;
+- correct module power;
+- SPI pin mapping.
 
-### ID đúng nhưng program/erase fail
+### ID Is Correct but Program/Erase Fails
 
-SPI cơ bản đã hoạt động. Tập trung:
+Basic SPI wiring is likely correct.
 
-- WEL,
-- BUSY,
-- CS high giữa commands,
-- address,
-- page boundary,
-- protection/status bits nếu module đã được cấu hình trước đó.
+Focus on:
 
-## 24. Logic analyzer
+- Write Enable;
+- WEL;
+- BUSY polling;
+- sector address;
+- page boundary;
+- poll limits.
 
-Decode SPI mode 0, MSB-first.
+## 24. Logic Analyzer
 
-JEDEC transaction expected:
-
-```text
-CS↓
-MOSI: 9F FF FF FF
-MISO: xx EF 40 17
-CS↑
-```
-
-Write Enable:
+For JEDEC:
 
 ```text
-CS↓ 06 CS↑
+CS LOW
+9F
+dummy -> EF
+dummy -> type
+dummy -> 17
+CS HIGH
 ```
 
-Status read:
+Verify SPI mode 0 and continuous CS across one command transaction.
 
-```text
-CS↓ 05 FF ... CS↑
-```
+## 25. Wear/Endurance Note
 
-## 25. Wear/endurance note
+The demo erases the same sector at every reset.
 
-Demo erase sector cuối mỗi reset. NOR flash có finite program/erase endurance. Không dùng reset loop liên tục như soak test nếu không cần; production design nên wear-level hoặc giới hạn erase.
+That is acceptable for controlled learning, but it is not a production storage
+policy.
 
-## 26. Bài tập mở rộng
+Avoid unnecessary repeated resets and do not store important data in the test
+sector.
 
-- read arbitrary region,
-- multi-page program helper,
-- chip erase,
-- SFDP/JEDEC capability discovery,
-- protection bits,
-- CRC record storage,
-- log-structured storage,
-- wear leveling,
-- SPI DMA,
-- power-loss-safe metadata.
+## 26. Extension Exercises
 
-## 27. Tài liệu liên quan
+- multi-page programming;
+- larger reads;
+- device-ID abstraction;
+- record storage;
+- CRC-protected records;
+- shared SPI bus;
+- asynchronous erase/program state machine.
+
+## 27. Related Documentation
 
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/porting_guide.md`](docs/porting_guide.md)

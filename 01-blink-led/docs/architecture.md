@@ -1,140 +1,166 @@
-# Kiến trúc — 01-blink-led
+# Architecture — 01-blink-led
 
-## 1. Dependency graph
-
-```text
-Application
-   ├──> Time Service ───────> Board Timebase ───> MCAL SysTick ───> Cortex-M3
-   └──> Indication Service ─> Board LED ─────────> MCAL GPIO ──────> STM32F103
-
-system/ = composition root
-startup/linker/config/tools = infrastructure
-```
-
-## 2. Trách nhiệm từng tầng
-
-| Tầng/module | Trách nhiệm |
-|---|---|
-| Application | Quyết định khi nào toggle logical LED |
-| Time Service | Cung cấp thời gian monotonic theo ms và periodic helper |
-| Indication Service | Biến logical indication thành lời gọi BSP |
-| Event Service | Queue portable được init nhưng chưa tham gia blink behavior |
-| Board | Khởi tạo clock, LED, timebase |
-| Board LED | Map logical status LED tới PC13 active-low |
-| Board Timebase | Map timebase tới SysTick |
-| MCAL RCC | Cấu hình clock register |
-| MCAL GPIO | Cấu hình/ghi/toggle GPIO |
-| MCAL SysTick | Cấu hình core SysTick, sở hữu tick counter và ISR |
-| Platform | Base address, register struct, bit mask |
-| System | Thứ tự init, super-loop, panic/fault |
-| Startup | Vector table, reset entry |
-| Linker | Flash/RAM layout |
-
-## 3. Initialization dependency
-
-`board_init()` phải chạy trước Services vì:
-
-- LED service cần GPIO đã configure,
-- time service cần SysTick đã configure,
-- Application lấy timestamp ngay trong `application_init()`.
-
-Thứ tự:
-
-```text
-board_init
- → time_service_init
- → indication_service_init
- → event_service_init
- → application_init
-```
-
-## 4. Runtime data flow
-
-### Time path
-
-```text
-SysTick hardware
- → SysTick_Handler
- → g_systick_ticks
- → mcal_systick_get_ticks
- → board_timebase_now_ms
- → time_service_now_ms
- → time_service_periodic_due
- → Application
-```
-
-### LED path
+## 1. Dependency Graph
 
 ```text
 Application
- → indication_service_toggle
- → board_led_toggle
- → mcal_gpio_toggle
- → GPIOC
+    |
+    +--> Time Service ------> Board Timebase -----> MCAL SysTick
+    |
+    +--> Indication Service -> Board LED ---------> MCAL GPIO
+                                                      |
+                                                      v
+                                               Platform Device
 ```
 
-## 5. Register ownership
+## 2. Layer Responsibilities
 
-Application/Services không biết `GPIOC`, `RCC`, `SysTick`.
+Application owns the 500 ms blink policy.
 
-- RCC register: MCAL RCC.
-- GPIO register: MCAL GPIO.
-- SysTick core register: MCAL SysTick.
-- Pin PC13/active-low: BSP.
+Time Service owns millisecond semantics.
 
-Đây là boundary quan trọng nhất của example.
+Indication Service owns the logical indicator API.
 
-## 6. ISR ownership
+Board Timebase maps the logical timebase to SysTick.
 
-`SysTick_Handler` nằm trong `mcal_systick.c`.
+Board LED maps the logical indicator to PC13 and active-low polarity.
 
-ISR chỉ:
+MCAL owns register-level peripheral behavior.
+
+Platform owns the STM32/Cortex-M register model.
+
+## 3. Initialization Dependency
 
 ```text
-g_systick_ticks++
+RCC clock
+    |
+Board LED + Board Timebase
+    |
+Services
+    |
+Application
 ```
 
-Không toggle LED và không gọi Application/Service.
+Application is initialized only after all required hardware resources are valid.
+
+## 4. Runtime Data Flow
+
+### Time Path
+
+```text
+SysTick interrupt
+    |
+MCAL tick counter
+    |
+Board Timebase
+    |
+Time Service
+    |
+Application periodic check
+```
+
+### LED Path
+
+```text
+Application
+    |
+Indication Service
+    |
+Board LED
+    |
+MCAL GPIO
+    |
+PC13
+```
+
+## 5. Register Ownership
+
+Only MCAL/Platform code knows:
+
+```text
+RCC APB2 enable bits
+GPIO CRH fields
+GPIO BSRR/BRR
+SysTick CTRL/LOAD/VAL
+```
+
+Application and Services never access those registers.
+
+## 6. ISR Ownership
+
+`SysTick_Handler()` belongs to MCAL SysTick because MCAL owns the core
+timebase peripheral.
+
+The ISR performs one bounded action:
+
+```text
+tick_count++
+```
 
 ## 7. Concurrency
 
-`g_systick_ticks` là `volatile uint32_t` được ghi trong ISR và đọc ở thread mode. Trên Cortex-M3, access aligned 32-bit là atomic cho use case này. Periodic helper dùng snapshot hiện tại và unsigned subtraction.
+The tick counter is written in ISR context and read in thread mode.
 
-## 8. HSE fallback
+The project uses a 32-bit counter and unsigned subtraction for wraparound-safe
+elapsed-time calculations.
 
-Clock source là state của board/RCC, không phải concern của Application. Nếu HSE fail, timebase được init bằng core clock thực tế nên blink period theo milliseconds vẫn giữ đúng về logic.
+No blocking synchronization is required for this simple one-writer/read-only
+pattern.
 
-## 9. Vì sao không busy delay trong Application
+## 8. HSE Fallback
 
-Busy delay sẽ:
+Board initialization tries HSE+PLL first.
 
-- khóa super-loop,
-- khó mở rộng nhiều task,
-- tăng coupling giữa behavior và CPU clock.
-
-Timestamp scheduling cho phép thêm task khác mà không thay đổi blink flow.
-
-## 10. Event Service hiện tại
-
-`event_service_init()` được gọi và queue storage được cấp tĩnh. Tuy nhiên blink Application không publish/consume event. Đây là scaffold có thể dùng khi mở rộng, không phải dependency bắt buộc của blink algorithm.
-
-## 11. Failure path
-
-Nếu `board_init()` hoặc `event_service_init()` fail:
+If that path fails:
 
 ```text
-system_init() = false
- → system_panic()
- → global IRQ disabled
- → infinite NOP loop
+HSI 8 MHz
 ```
 
-Fault handlers cũng đi vào cùng panic path.
+is selected.
 
-## 12. Extension boundaries
+The Board Timebase receives the actual system clock, so SysTick remains 1 kHz
+under either clock source.
 
-- Thêm pin → BSP + MCAL nếu mode mới.
-- Thêm logical LED → Indication Service/BSP.
-- Thêm periodic behavior → Application + Time Service.
-- Thêm peripheral → MCAL + Platform.
-- Không thêm register access vào Application chỉ vì example nhỏ.
+## 9. Why Application Does Not Use a Busy Delay
+
+A 500 ms busy delay would prevent the super-loop from performing other work.
+
+The timestamp design instead performs:
+
+```text
+check -> not due -> return
+```
+
+This is the scheduling model reused by later examples.
+
+## 10. Current Event Service
+
+No general event queue is needed in Example 01.
+
+Adding an event framework would increase complexity without solving a current
+requirement.
+
+## 11. Failure Path
+
+If board initialization fails:
+
+```text
+board_init() -> false
+system_init() -> false
+system_panic()
+```
+
+The Application never runs with an invalid timebase.
+
+## 12. Extension Boundaries
+
+Good extension points:
+
+- blink policy -> Application;
+- logical indicator behavior -> Service;
+- pin/polarity -> BSP;
+- GPIO/SysTick implementation -> MCAL;
+- register definitions -> Platform.
+
+Keep those boundaries intact.

@@ -1,172 +1,184 @@
 # STM32F1 Register-Level Bare-Metal Examples
 
-Thư mục này chứa chuỗi example độc lập cho **STM32F103C8T6 Blue Pill**, được sắp xếp từ nền tảng cơ bản đến pipeline peripheral phức tạp hơn. Mỗi example có Makefile, startup, linker script, platform register map và tài liệu riêng để có thể build/flash/debug mà không cần phụ thuộc project khác.
+## 1. Philosophy of the Example Series
 
-## 1. Triết lý của chuỗi example
+The examples are a progressive learning sequence.
 
-Các example được thiết kế để luyện ba kỹ năng song song:
-
-- **Register-level programming**: hiểu chính xác peripheral register, flag, clock enable, IRQ và data path.
-- **Firmware architecture**: Application không biết pin/register; BSP/ECUAL/MCAL có trách nhiệm rõ ràng.
-- **Debugability**: có symbol debug, error counter, layer checker và luồng xử lý dễ trace.
-
-Không dùng:
-
-- STM32 HAL
-- STM32 LL
-- Standard Peripheral Library
-- libopencm3
-- Arduino Core
-- RTOS
-- dynamic allocation
-
-## 2. Lộ trình học đề xuất
-
-### Bước 1 — GPIO và timebase
-
-[`01-blink-led`](01-blink-led/) tập trung vào:
-
-- HSE/PLL + HSI fallback,
-- GPIO output,
-- SysTick 1 ms,
-- periodic scheduling không blocking.
-
-Đây là example nên đọc đầu tiên để hiểu startup → board → service → application.
-
-### Bước 2 — Interrupt input
-
-[`02-gpio-input-interrupt`](02-gpio-input-interrupt/) thêm:
-
-- GPIO pull-up,
-- AFIO EXTI mapping,
-- EXTI falling edge,
-- NVIC priority/enable,
-- ISR event capture,
-- debounce ở thread mode.
-
-### Bước 3 — UART polling
-
-[`03-uart-polling`](03-uart-polling/) giới thiệu:
-
-- USART1,
-- baud-rate divider,
-- RXNE/TXE polling,
-- error flag,
-- API `try_read`/`try_write`.
-
-### Bước 4 — UART interrupt + ring buffer
-
-[`04-uart-interrupt-ring-buffer`](04-uart-interrupt-ring-buffer/) chuyển data path sang interrupt:
-
-- RX ring,
-- TX ring,
-- RXNE/TXE interrupt,
-- overflow/error counters,
-- critical section ngắn để khởi động TX an toàn.
-
-### Bước 5 — Timer PWM
-
-[`05-timer-pwm`](05-timer-pwm/) giới thiệu:
-
-- TIM2_CH1,
-- PWM mode 1,
-- PSC/ARR/CCR,
-- preload,
-- quy tắc x2 timer clock khi APB prescaler khác 1.
-
-### Bước 6 — I2C + external device
-
-[`06-i2c-display`](06-i2c-display/) thêm:
-
-- I2C1 fast mode,
-- open-drain pins,
-- START/ADDR/TXE/BTF/STOP sequence,
-- ECUAL SSD1306,
-- framebuffer 1024 byte,
-- transport callback giữa Service và ECUAL/BSP.
-
-### Bước 7 — SPI flash
-
-[`07-spi-memory`](07-spi-memory/) thêm:
-
-- SPI1 full-duplex polling,
-- software CS,
-- JEDEC ID,
-- W25Q64 status polling,
-- sector erase,
-- page program,
-- read-back verify.
-
-### Bước 8 — ADC + DMA pipeline
-
-[`08-adc-dma`](08-adc-dma/) kết hợp:
-
-- TIM3 TRGO,
-- ADC1 regular conversion,
-- ADC calibration,
-- DMA1 Channel 1 circular,
-- half/full-transfer interrupt,
-- block processing ngoài ISR.
-
-## 3. Bảng tổng hợp
-
-| Example | Peripheral | Pin chính | IRQ mạnh | Output/kiểm tra |
-|---|---|---|---|---|
-| 01 | GPIOC, SysTick | PC13 | `SysTick_Handler` | LED blink 500 ms |
-| 02 | GPIOA/C, AFIO, EXTI, SysTick | PA0, PC13 | `EXTI0_IRQHandler`, `SysTick_Handler` | Nhấn nút toggle LED |
-| 03 | USART1 | PA9/PA10 | Không dùng USART IRQ | Greeting + echo |
-| 04 | USART1, NVIC | PA9/PA10 | `USART1_IRQHandler` | Greeting + buffered echo |
-| 05 | TIM2_CH1, SysTick | PA0 | `SysTick_Handler` | PWM fade |
-| 06 | I2C1, SSD1306, SysTick | PB6/PB7 | `SysTick_Handler` | OLED text/progress |
-| 07 | SPI1, W25Q64, SysTick | PA4..PA7 | `SysTick_Handler` | JEDEC + erase/program/verify |
-| 08 | TIM3, ADC1, DMA1 | PA0 | `DMA1_Channel1_IRQHandler` | ADC statistics + PC13 threshold |
-
-## 4. Wiring tổng hợp
-
-### SWD — dùng cho tất cả example
+Every project keeps the same architecture:
 
 ```text
-ST-Link             Blue Pill
------------------------------
-SWDIO      -------  PA13
-SWCLK      -------  PA14
-GND        -------  GND
-3.3V REF   -------  3.3V
+Application -> Services -> BSP/ECUAL -> MCAL -> Platform -> Hardware
 ```
 
-### Example 02 — button
+Only the peripheral topic changes.
+
+The goal is not merely to make a peripheral work. The goal is to understand:
+
+- which layer owns the peripheral;
+- how clock/reset/configuration are performed;
+- how an ISR hands work to thread mode;
+- how Application remains hardware-independent.
+
+## 2. Recommended Learning Roadmap
+
+### Step 1 — GPIO and Timebase
+
+`01-blink-led`
+
+Learn:
+
+- PC13 active-low output;
+- RCC GPIO clock;
+- SysTick;
+- periodic non-blocking scheduling;
+- logical indication Service.
+
+### Step 2 — Interrupt Input
+
+`02-gpio-input-interrupt`
+
+Learn:
+
+- PA0 pull-up;
+- AFIO;
+- EXTI0;
+- NVIC;
+- ISR event handoff;
+- debounce outside ISR.
+
+### Step 3 — UART Polling
+
+`03-uart-polling`
+
+Learn:
+
+- USART1 registers;
+- BRR calculation;
+- RXNE/TXE polling;
+- non-blocking byte API.
+
+### Step 4 — UART Interrupt + Ring Buffer
+
+`04-uart-interrupt-ring-buffer`
+
+Learn:
+
+- RX/TX ring buffers;
+- single-producer/single-consumer ownership;
+- USART IRQ;
+- TXE interrupt lifecycle;
+- overflow/error counters.
+
+### Step 5 — Timer PWM
+
+`05-timer-pwm`
+
+Learn:
+
+- TIM2_CH1;
+- APB1 timer x2 clock behavior;
+- PSC/ARR/CCR;
+- preload;
+- hardware PWM.
+
+### Step 6 — I2C + External Device
+
+`06-i2c-display`
+
+Learn:
+
+- I2C1 timing;
+- PB6/PB7 AF open-drain;
+- bounded polling;
+- SSD1306 framebuffer;
+- Service-to-ECUAL transport composition.
+
+### Step 7 — SPI Flash
+
+`07-spi-memory`
+
+Learn:
+
+- SPI1 register configuration;
+- mode 0;
+- software CS;
+- W25Q64 JEDEC ID;
+- WEL/BUSY;
+- sector erase/page program/read-back.
+
+### Step 8 — ADC + DMA Pipeline
+
+`08-adc-dma`
+
+Learn:
+
+- TIM3 trigger;
+- ADC1 calibration;
+- DMA1 Channel 1 circular buffer;
+- half/full-transfer events;
+- stable block publishing;
+- Service-side statistics;
+- Application hysteresis.
+
+## 3. Summary Table
+
+| Example | Hardware | Interrupts | Main pattern |
+|---|---|---|---|
+| 01 | PC13 + SysTick | SysTick | periodic non-blocking task |
+| 02 | PA0 + EXTI0 | SysTick, EXTI0 | raw edge -> debounce |
+| 03 | USART1 | none | polling |
+| 04 | USART1 | USART1 | RX/TX rings |
+| 05 | TIM2_CH1 | SysTick | hardware PWM + scheduled duty |
+| 06 | I2C1 + SSD1306 | SysTick | framebuffer + polling bus |
+| 07 | SPI1 + W25Q64 | SysTick | synchronous memory commands |
+| 08 | TIM3 + ADC1 + DMA1 CH1 | DMA1 CH1 | sampled-data blocks |
+
+## 4. Wiring Summary
+
+### SWD — Used by All Examples
+
+```text
+ST-Link      Blue Pill
+----------------------
+SWDIO   ---> PA13 / SWDIO
+SWCLK   ---> PA14 / SWCLK
+GND     ---> GND
+3.3V    ---> 3.3V reference
+```
+
+### Example 02 — Button
 
 ```text
 PA0 ---- push button ---- GND
 ```
 
-PA0 dùng pull-up nội.
+PA0 uses the internal pull-up.
 
 ### Example 03/04 — USB-UART
 
 ```text
 PA9  USART1_TX  ---> USB-UART RX
 PA10 USART1_RX  <--- USB-UART TX
-GND             ---- USB-UART GND
+GND              --- USB-UART GND
 ```
 
-Adapter phải dùng logic 3.3 V.
+Use 3.3 V logic, `115200 8N1`.
 
 ### Example 05 — PWM LED
 
 ```text
-PA0 / TIM2_CH1 ---- 330 Ω ---- LED ---- GND
+PA0 / TIM2_CH1 ---- 330 ohm ---- LED ---- GND
 ```
 
 ### Example 06 — OLED I2C
 
 ```text
-Blue Pill              OLED
----------------------------
-GND        ----------  GND
-3.3V       ----------  VCC
-PB6        ----------  SCL
-PB7        ----------  SDA
+Blue Pill      SSD1306
+----------------------
+3.3V       ---> VCC
+GND        ---> GND
+PB6        ---> SCL
+PB7        ---> SDA
 ```
 
 ### Example 07 — W25Q64
@@ -182,180 +194,165 @@ PA6         ------  D1 / DO / MISO
 PA7         ------  D0 / DI / MOSI
 ```
 
-### Example 08 — analog input
+### Example 08 — Analog Input
 
 ```text
-3.3V ---- potentiometer ---- GND
+3.3 V ---- potentiometer ---- GND
                   |
                   +---- PA0 / ADC1_IN0
 ```
 
-## 5. Build/flash chung
-
-Vào thư mục example:
+## 5. Common Build/Flash Flow
 
 ```bash
-cd 04-uart-interrupt-ring-buffer
+make check-layers
+make clean
+make
+make flash
 ```
 
-Kiểm tra dependency:
+Useful targets:
+
+```bash
+make size
+make tree
+make erase
+```
+
+## 6. Common Debug Flow
+
+```bash
+# Terminal 1
+make debug-server
+
+# Terminal 2
+make debug
+```
+
+The OpenOCD configuration uses `reset_config none`.
+
+## 7. Common Clock Behavior
+
+Every board first tries 72 MHz HSE+PLL.
+
+If that fails:
+
+```text
+HSI fallback = 8 MHz
+```
+
+Peripheral code must use the actual active clock.
+
+Examples:
+
+- SysTick reload follows active SYSCLK.
+- TIM2/TIM3 calculations use actual APB1 timer clock.
+- SPI1 prescaler uses actual PCLK2.
+- I2C1 timing uses actual PCLK1.
+- ADC clock selection stays within the configured maximum.
+
+## 8. Architecture and Layer Checker
+
+The register-level dependency path is:
+
+```text
+Application
+    |
+Services
+    |
+BSP / ECUAL
+    |
+MCAL
+    |
+Platform Device
+    |
+Platform Architecture
+```
+
+Run:
 
 ```bash
 make check-layers
 ```
 
-Build sạch:
+Do not bypass the checker to make a forbidden include compile.
 
-```bash
-make clean
-make
-```
+## 9. Interrupt Ownership and Thread Mode
 
-Flash:
+Interrupt handlers stay at the lowest owning layer.
 
-```bash
-make flash
-```
-
-Xem size:
-
-```bash
-make size
-```
-
-## 6. Debug chung
-
-Terminal 1:
-
-```bash
-make debug-server
-```
-
-Terminal 2:
-
-```bash
-make debug
-```
-
-OpenOCD dùng SWD và:
-
-```tcl
-reset_config none
-adapter speed 1000
-```
-
-Điều này phù hợp với ST-Link clone không nối NRST.
-
-## 7. Clock behavior chung
-
-Phần lớn example dùng:
+The ISR normally:
 
 ```text
-HSE 8 MHz → PLL x9 → SYSCLK 72 MHz
+read/clear flag
+capture byte/event/block
+update bounded state
+return
 ```
 
-Nếu HSE/PLL không thành công:
+Debounce, echo policy, display rendering, memory verification, sample
+statistics, and LED policy belong in thread mode.
 
-```text
-HSI 8 MHz fallback
-```
+## 10. `system_idle()` in the Example Series
 
-Các module phụ thuộc clock được truyền tần số thực tế từ RCC layer:
-
-- USART1 dùng APB2 clock,
-- I2C1 dùng APB1 clock,
-- SPI1 dùng APB2 clock,
-- TIM2/TIM3 dùng timer clock,
-- ADC chọn prescaler để giữ ADC clock trong giới hạn cấu hình.
-
-## 8. Kiến trúc và layer checker
-
-Dependency chuẩn:
-
-```text
-app
- ↓
-services
- ↓
-bsp / ecual
- ↓
-mcal
- ↓
-platform
-```
-
-`tools/scripts/check_layers.py` quét include project-local và fail build nếu có dependency đi ngược.
-
-Ví dụ Application hợp lệ:
-
-```c
-#include "serial_service.h"
-```
-
-Ví dụ Application không hợp lệ:
-
-```c
-#include "mcal_usart.h"
-#include "stm32f103xb.h"
-```
-
-## 9. Interrupt ownership và thread mode
-
-Khi đọc source, phân biệt:
-
-- **interrupt context**: acknowledge hardware, capture dữ liệu/event,
-- **thread mode**: debounce, echo policy, statistics, display render, LED state machine.
-
-Không đánh giá chất lượng ISR chỉ bằng số dòng; điều quan trọng là ISR không kéo dependency tầng trên và không thực hiện công việc có latency khó kiểm soát.
-
-## 10. `system_idle()` trong chuỗi example
-
-Tất cả numbered examples trong archive hiện tại dùng:
+The completed examples use:
 
 ```c
 cortex_m3_nop();
 ```
 
-thay vì `WFI`. Lý do thực tế là debug với ST-Link không có NRST dễ dự đoán hơn. Nếu tối ưu power, cần đánh giá riêng sleep/wakeup và debug workflow.
+rather than `WFI`.
 
-## 11. Cách chọn example để mở rộng
+This is intentional for a debug setup without NRST.
 
-Nếu cần xây một project mới:
+## 11. Choosing an Example to Extend
 
-- UART command shell → bắt đầu từ 04.
-- PWM actuator → bắt đầu từ 05.
-- OLED UI → bắt đầu từ 06.
-- External SPI NOR → bắt đầu từ 07.
-- Sensor analog streaming → bắt đầu từ 08.
-- Một peripheral chưa có → dùng `template/` và tham khảo MCAL gần nhất.
+Choose the example whose **architecture pattern** matches your new problem:
 
-## 12. Quy tắc khi copy code giữa example
+- periodic task -> 01;
+- edge/event input -> 02;
+- polling byte stream -> 03;
+- interrupt byte stream -> 04;
+- hardware waveform -> 05;
+- I2C external device -> 06;
+- SPI memory/device -> 07;
+- continuous sampled data -> 08.
 
-Không copy cả module nếu không cần. Thay vào đó:
+## 12. Rules When Copying Code Between Examples
 
-1. xác định API public,
-2. copy MCAL/platform dependency tối thiểu,
-3. update `board_init()`,
-4. chạy layer checker,
-5. kiểm tra IRQ symbol mạnh/yếu,
-6. kiểm tra clock input,
-7. kiểm tra linker size,
-8. cập nhật README/architecture/porting guide.
+When reusing a module:
 
-## 13. Lưu ý an toàn phần cứng
+1. copy its public API;
+2. copy its implementation;
+3. copy required configuration;
+4. copy required Platform/MCAL support;
+5. preserve ISR ownership;
+6. preserve clock assumptions;
+7. run the layer checker;
+8. re-test hardware.
 
-- GPIO/USART/I2C/SPI trong các wiring này là logic 3.3 V.
-- Không đưa tín hiệu analog PA0 vượt rail nguồn.
-- Không short GPIO output trực tiếp vào GND/3.3 V.
-- Example W25Q64 xóa sector cuối mỗi reset; không lưu dữ liệu quan trọng tại sector đó khi chạy demo.
-- Với OLED I2C, nếu module không có pull-up thì cần pull-up ngoài lên 3.3 V.
+Avoid copying isolated register writes without their initialization/error
+context.
 
-## 14. Tài liệu chi tiết
+## 13. Hardware Safety Notes
 
-Trong mỗi example:
+- Use 3.3 V logic.
+- Always share ground.
+- Use a resistor with an external LED.
+- Keep ADC input between GND and VDDA.
+- Verify I2C pull-ups.
+- Power W25Q64 from 3.3 V.
+- Remember Example 07 erases the last 4 KiB sector at every reset.
 
-- `README.md`: hướng dẫn build/run/test.
-- `docs/architecture.md`: trách nhiệm module, data flow, interrupt/concurrency.
-- `docs/porting_guide.md`: checklist đổi board/pin/peripheral/clock.
+## 14. Detailed Documentation
 
-Đọc cả ba file trước khi sửa kiến trúc của example.
+Every example contains:
+
+```text
+README.md
+docs/architecture.md
+docs/porting_guide.md
+```
+
+Use the README for bring-up, architecture document for ownership/concurrency,
+and porting guide before changing pins, clocks, IRQs, or MCU family.

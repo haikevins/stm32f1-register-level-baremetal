@@ -1,104 +1,97 @@
 # Porting Guide — 04-uart-interrupt-ring-buffer
 
-## 1. Những phần có thể giữ nguyên
+## 1. Parts That Can Remain Unchanged
 
-Khi đổi board/USART nhưng vẫn muốn byte-stream API:
+When changing only physical UART hardware, keep:
 
 ```text
-app/
-services/serial_service.*
+Application
+UART Service
+ring-buffer behavior
 ```
 
-nên giữ nguyên nếu contract không đổi.
+Replace BSP/MCAL mapping as required.
 
-## 2. Đổi USART instance
+## 2. Changing the USART Instance
 
-Cần cập nhật:
+Review:
 
-- enum instance MCAL,
-- register pointer,
-- RCC clock-enable mask,
-- IRQ number,
-- IRQ priority mapping,
-- strong ISR đúng tên vector,
-- BSP pin mapping,
-- bus clock source.
+- base address;
+- RCC clock bit;
+- APB clock;
+- pins;
+- IRQ number;
+- vector handler name;
+- NVIC mapping.
 
-USART2/3 nằm APB1 trên STM32F103.
+## 3. Changing Buffer Size
 
-## 3. Đổi buffer size
+Update MCAL configuration.
 
-Sửa:
+Requirements:
 
-```c
-MCAL_USART_RX_BUFFER_SIZE
-MCAL_USART_TX_BUFFER_SIZE
-```
+- at least 2;
+- power of two;
+- compatible with index width.
 
-Ràng buộc:
+Check SRAM use.
 
-- >= 2,
-- power of two,
-- <= 32768,
-- usable = size - 1.
+## 4. Changing IRQ Priority
 
-Tăng buffer tăng RAM consumption nhưng không thay thế việc loại blocking task.
+Review all interrupt priorities.
 
-## 4. Đổi IRQ priority
+UART priority should be sufficient to avoid overrun but the ISR must remain
+short.
 
-Xem toàn bộ hệ thống, không chọn priority cô lập. Nếu ghép với ADC DMA/EXTI, xác định peripheral nào có latency budget chặt hơn.
+## 5. Changing Baud/Data Format
 
-## 5. Đổi baud/data format
+Extend MCAL USART setup for new baud/parity/stop/word length.
 
-Baud có thể đổi config trực tiếp. 9-bit/parity/2-stop cần mở rộng register config.
+Keep those details below Service.
 
-## 6. Đổi TX/RX pins
+## 6. Changing TX/RX Pins
 
-Nếu dùng remap:
+Update BSP pin mapping and AFIO/remap support if required.
 
-- AFIO enable/map,
-- đúng GPIO mode,
-- không xung đột SWD/JTAG.
+## 7. Porting to DMA UART
 
-## 7. Port sang DMA UART
+Keep upper API if possible.
 
-Có thể giữ Serial Service API nhưng lower-layer semantics thay đổi. Cần xác định:
+Replace byte-by-byte ISR movement with DMA ownership.
 
-- ring ownership,
-- DMA half/full event,
-- TX completion,
-- abort/error handling.
+Define:
 
-Không để DMA ISR gọi Application.
+- DMA channel;
+- RX circular semantics;
+- TX completion semantics;
+- overflow/backpressure behavior.
 
-## 8. Validation concurrency
+## 8. Concurrency Validation
 
-Stress test bắt buộc:
+Stress:
 
-- continuous RX,
-- simultaneous TX/RX,
-- TX ring full,
-- RX ring full,
-- injected framing/noise nếu có thiết bị,
-- critical-section race bằng load cao,
-- wrap index nhiều vòng.
+- ring wraparound;
+- full/empty transitions;
+- simultaneous producer/consumer activity;
+- debugger halt/resume;
+- high-rate RX.
 
-## 9. Symbol validation
+Verify no lost TX-start transition.
 
-Sau build:
+## 9. Symbol Validation
 
-```bash
-arm-none-eabi-nm build/firmware.elf | grep USART1_IRQHandler
-```
+Inspect the ELF/map and verify the expected strong handler exists.
 
-Handler interrupt-driven phải là strong text symbol, không weak default.
+If moving away from USART1, the new handler must replace the corresponding weak
+startup symbol.
 
-## 10. Common pitfalls
+## 10. Common Pitfalls
 
-- quên tắt TXEIE khi ring empty → interrupt storm,
-- enqueue byte nhưng quên kick TXEIE,
-- shared index bị nhiều writer,
-- size không power-of-two nhưng vẫn dùng mask,
-- xử lý echo trong ISR,
-- clear error flags sai SR→DR sequence,
-- nhầm APB clock.
+- wrong IRQ number;
+- wrong handler name;
+- wrong APB clock;
+- non-power-of-two ring size;
+- multiple producers on one ring;
+- leaving TXE interrupt always enabled;
+- blocking inside ISR;
+- ignoring overflow diagnostics.

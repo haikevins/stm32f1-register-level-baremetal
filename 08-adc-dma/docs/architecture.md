@@ -1,156 +1,148 @@
-# Kiến trúc — 08-adc-dma
+# Architecture — 08-adc-dma
 
-## 1. Hardware data path
+## 1. Hardware Data Path
 
 ```text
-TIM3 update
-   ↓ TRGO
+TIM3 update @ 1 kHz
+    |
 ADC1 channel 0
-   ↓ DR + DMA request
+    |
+ADC1->DR
+    |
 DMA1 Channel 1
-   ↓ circular memory
-g_dma_buffer[64]
-   ↓ HT / TC IRQ
-g_completed_block[32]
-   ↓ thread-mode take
-ADC Service
-   ↓
-adc_measurement_t
-   ↓
-Application
+    |
+64-sample circular buffer
 ```
 
-## 2. Software dependency graph
+Individual samples move without CPU intervention.
+
+## 2. Software Dependency Graph
 
 ```text
 Application
-   ├────────────> ADC Service
-   │                 ↓
-   │             Board ADC DMA
-   │              /   |   |   \
-   │       MCAL ADC  DMA Timer NVIC/IRQ
-   │                 ↓
-   │              Platform
-   │
-   └────────────> Indication Service
-                         ↓
-                     Board LED
-                         ↓
-                     MCAL GPIO
+    |
+    +--> ADC Service ------> Board ADC/DMA
+    |                           |
+    |                           +--> MCAL ADC
+    |                           +--> MCAL DMA
+    |                           +--> MCAL Timer
+    |                           +--> MCAL NVIC
+    |
+    +--> Indication Service -> Board LED -> MCAL GPIO
 ```
 
-## 3. Ownership table
+## 3. Ownership Table
 
-| State/resource | Owner |
+| Concern | Owner |
 |---|---|
-| TIM3 trigger config | MCAL Timer Trigger |
-| ADC registers/calibration | MCAL ADC |
-| DMA registers/flags | MCAL DMA |
-| DMA IRQ enable | MCAL NVIC |
-| `g_dma_buffer` | Board ADC DMA pipeline |
-| `g_completed_block` | Board ADC DMA pipeline |
-| block-ready/overrun/error | Board ADC DMA |
-| sample processing | ADC Service |
-| threshold/hysteresis | Application |
+| sample timing | TIM3/MCAL |
+| ADC conversion | ADC MCAL |
+| DMA transfer | DMA MCAL |
+| IRQ/block publication | Board ADC/DMA |
+| statistics | ADC Service |
+| threshold policy | Application |
+| PC13 polarity | BSP |
 
-## 4. ISR placement trong code hiện tại
+## 4. ISR Placement in the Current Code
 
-Khác một số example khác nơi ISR nằm trực tiếp MCAL, handler DMA hiện ở BSP composite module:
+The strong DMA1 Channel 1 handler is in the Board ADC/DMA ownership module
+because that module owns the complete ADC+DMA board resource.
 
-```text
-bsp/bluepill/src/board_adc_dma.c
-```
+It calls the MCAL only to take/clear DMA event flags.
 
-MCAL vẫn sở hữu raw DMA register/flag handling; BSP sở hữu mapping "DMA event nào tương ứng half-buffer nào" và completed block.
+No Service/Application call occurs in the ISR.
 
-Tài liệu phải phản ánh implementation này khi refactor/port.
+## 5. Concurrency Zones
 
-## 5. Concurrency zones
-
-Có hai vùng shared ISR/thread:
+Three storage zones:
 
 ```text
-g_block_ready
-g_completed_block
-g_overrun_count
-g_error_count
+DMA circular buffer
+BSP stable completed block
+Service processing buffer
 ```
 
-Thread-mode `take_sample_block` disable IRQ ngắn trong lúc copy/clear state.
+The block-ready flag bridges ISR and thread mode.
 
-DMA hardware đồng thời ghi `g_dma_buffer`, nhưng ISR chỉ copy half đã hoàn tất. Circular DMA chuyển tiếp sang half còn lại.
+## 6. Overrun Semantics
 
-## 6. Overrun semantics
-
-Overrun ở đây không phải ADC hardware overrun flag. Nó có nghĩa:
+If a new half completes before the previous published block is consumed:
 
 ```text
-producer đã publish block mới
-trong khi consumer chưa take block cũ
+overrun_count++
+newest block replaces pending block
 ```
 
-Counter là indicator cho system-level processing latency.
+The design favors current data over an unbounded backlog.
 
-## 7. Sampling determinism
+## 7. Sampling Determinism
 
-Sample interval do TIM3 hardware quyết định, không phụ thuộc super-loop execution time. Đây là ưu điểm chính so với polling ADC từ Application.
+TIM3 determines sample timing.
 
-Thread-mode processing có thể jitter nhưng sample timestamp spacing vẫn dựa trên trigger hardware.
+Therefore thread-mode scheduling jitter does not directly change conversion
+times.
 
-## 8. Service decoupling
+Long interrupt masking can still delay DMA servicing and cause overrun.
 
-ADC Service nhận một snapshot array và output semantic struct:
+## 8. Service Decoupling
 
-```c
-adc_measurement_t
-```
-
-Application không biết DMA block size khi chỉ consume measurement, ngoài debug timing behavior.
-
-## 9. Error propagation
-
-DMA transfer error:
+ADC Service receives raw blocks and produces:
 
 ```text
-DMA flag
- → MCAL event
- → BSP error_count
- → ADC Service getter
- → Application debug global
+average
+minimum
+maximum
+millivolts
+sequence
 ```
 
-ADC calibration/config failure xảy ra init và propagate qua `board_init` → panic.
+Application does not know DMA buffer geometry or ADC registers.
 
-## 10. Memory use
+## 9. Error Propagation
 
-Core acquisition buffers:
+DMA transfer errors become a counter exposed through the Service.
+
+Initialization/calibration failures return `false` and lead to
+`system_panic()`.
+
+## 10. Memory Use
+
+Major sample storage:
 
 ```text
-DMA buffer:       64 × 2 = 128 byte
-completed block:  32 × 2 = 64 byte
-Service buffer:   32 × 2 = 64 byte
+DMA buffer:      64 * 2 = 128 bytes
+published block: 32 * 2 = 64 bytes
+Service buffer:  32 * 2 = 64 bytes
 ```
 
-Ngoài các state/counters khác. Đây là trade-off rõ ràng giữa snapshot simplicity và RAM.
+The RAM cost buys a simple ownership model.
 
-## 11. Extension options
+## 11. Extension Options
 
-### Multi-channel scan
+### Multi-Channel Scan
 
-Cần update:
+Configure multiple ADC sequence ranks and define the interleaved DMA layout.
 
-- ADC sequence length/SQR registers,
-- DMA interleaved interpretation,
-- Service block parser.
+### No-Copy Ping-Pong
 
-### No-copy ping-pong
+Process DMA halves directly with strict ownership and timing guarantees.
 
-Có thể tránh ISR copy bằng ownership protocol trên DMA halves, nhưng cần xử lý trường hợp hardware wrap trước consumer.
+This reduces copies but increases concurrency complexity.
 
-### Queue nhiều block
+### Queue Multiple Blocks
 
-Thêm static block queue để absorb latency, nhưng vẫn phải định nghĩa overflow policy.
+Store several completed blocks if every block must be preserved.
 
-## 12. Boundary rule
+This increases SRAM use and requires a clear queue overflow policy.
 
-Không đưa raw `ADC1->DR`, DMA ISR flags hoặc TIM3 register lên Application. Nếu Application cần sample rate metadata, expose qua semantic config/API thay vì register access.
+## 12. Boundary Rule
+
+Preserve:
+
+```text
+hardware movement -> BSP/MCAL
+sample interpretation -> Service
+product policy -> Application
+```
+
+Do not move ADC/DMA register logic upward for convenience.

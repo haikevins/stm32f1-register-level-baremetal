@@ -1,139 +1,40 @@
-# 01-blink-led — GPIO output + SysTick + non-blocking super-loop
+# 01-blink-led — GPIO Output + SysTick + Non-Blocking Super-Loop
 
-Example đầu tiên của chuỗi register-level. Firmware cấu hình clock, điều khiển LED onboard **PC13** và dùng **SysTick 1 kHz** làm timebase để toggle LED mỗi **500 ms** mà không busy-delay trong Application.
+## 1. Learning Objectives
 
-## 1. Mục tiêu học tập
+This first example introduces the architecture used throughout the repository.
 
-Sau example này cần nắm được:
+You will learn how to:
 
-- vector table và `Reset_Handler` hoạt động như thế nào,
-- `.data` được copy và `.bss` được zero trước `main()`,
-- cách RCC chuyển từ HSI sang HSE + PLL,
-- cách cấu hình GPIO output bằng `CRH`/`BSRR`,
-- cách cấu hình SysTick trực tiếp qua core register,
-- cách viết periodic task bằng timestamp thay vì delay blocking,
-- cách tách Application → Service → BSP → MCAL → Platform,
-- cách dùng `make check-layers` để ngăn include sai tầng.
+- configure the Blue Pill onboard LED through register-level MCAL;
+- hide active-low electrical behavior behind a logical Service;
+- build a 1 ms SysTick timebase;
+- schedule periodic work without a blocking delay;
+- handle 72 MHz HSE/PLL startup with 8 MHz HSI fallback;
+- keep Application independent from GPIO and SysTick registers.
 
-Không dùng HAL, LL, SPL, libopencm3, Arduino Core hoặc RTOS.
+## 2. Expected Result
 
-## 2. Kết quả mong đợi
+The onboard PC13 LED changes state every 500 ms.
 
-LED onboard Blue Pill tại PC13 toggle mỗi 500 ms:
+Because the LED is active-low:
 
 ```text
-500 ms OFF
-500 ms ON
-500 ms OFF
-...
+PC13 LOW  -> LED ON
+PC13 HIGH -> LED OFF
 ```
 
-PC13 là active-low:
+One complete ON/OFF cycle takes about one second.
+
+## 3. Hardware
+
+No external components are required.
 
 ```text
-PC13 = 0 → LED ON
-PC13 = 1 → LED OFF
+Blue Pill onboard LED -> PC13
 ```
 
-Cấu hình mặc định:
-
-| Tham số | Giá trị |
-|---|---:|
-| HSE | 8 MHz |
-| SYSCLK mục tiêu | 72 MHz |
-| Fallback | HSI 8 MHz |
-| SysTick | 1000 Hz |
-| Tick period | 1 ms |
-| LED | PC13 |
-| LED active level | Low |
-| Blink period | 500 ms |
-
-## 3. Phần cứng
-
-Không cần linh kiện ngoài ngoài Blue Pill và debugger.
-
-SWD:
-
-```text
-ST-Link             Blue Pill
------------------------------
-SWDIO      -------  PA13
-SWCLK      -------  PA14
-GND        -------  GND
-3.3V REF   -------  3.3V
-```
-
-## 4. Cấu hình compile-time
-
-`config/board_config.h`:
-
-```c
-#define BOARD_HSE_FREQUENCY_HZ (8000000UL)
-#define BOARD_TARGET_CLOCK_HZ   (72000000UL)
-#define BOARD_TIMEBASE_HZ       (1000UL)
-```
-
-`config/application_config.h`:
-
-```c
-#define APPLICATION_BLINK_PERIOD_MS (500UL)
-```
-
-`config/mcal_config.h`:
-
-```c
-#define MCAL_RCC_READY_TIMEOUT_CYCLES (1000000UL)
-```
-
-`config/service_config.h` hiện giữ event queue capacity 16 phần tử. Event service được init như một phần skeleton service nhưng blink logic hiện tại không publish event.
-
-## 5. Luồng khởi động
-
-```text
-Reset_Handler
-    ↓
-runtime_init()
-    ├─ copy .data Flash → RAM
-    ├─ zero .bss
-    └─ main()
-         ↓
-cortex_m3_disable_irq()
-         ↓
-system_init()
-    ├─ board_init()
-    │   ├─ configure HSE/PLL hoặc HSI fallback
-    │   ├─ board_led_init()
-    │   └─ board_timebase_init()
-    ├─ time_service_init()
-    ├─ indication_service_init()
-    ├─ event_service_init()
-    └─ application_init()
-         ↓
-cortex_m3_enable_irq()
-         ↓
-super-loop
-```
-
-## 6. Clock setup
-
-`mcal_rcc_configure_hse_pll()` thực hiện:
-
-1. bảo đảm HSI đang chạy,
-2. switch system clock về HSI trước khi đổi PLL,
-3. tắt PLL và chờ `PLLRDY` clear,
-4. bật HSE và chờ `HSERDY`,
-5. chọn Flash latency theo clock mục tiêu,
-6. cấu hình APB1 prescaler khi cần,
-7. chọn HSE làm PLL source và multiplier,
-8. bật PLL, chờ `PLLRDY`,
-9. switch SYSCLK sang PLL,
-10. ghi lại `g_system_clock_hz`.
-
-Nếu HSE/PLL fail, `mcal_rcc_use_hsi()` đưa hệ thống về HSI 8 MHz.
-
-## 7. GPIO LED
-
-Mapping:
+Board configuration:
 
 ```c
 #define BOARD_STATUS_LED_PORT         MCAL_GPIO_PORT_C
@@ -141,151 +42,185 @@ Mapping:
 #define BOARD_STATUS_LED_ACTIVE_LEVEL MCAL_GPIO_LEVEL_LOW
 ```
 
-Luồng:
-
-```text
-Application
-  → indication_service_toggle()
-  → board_led_toggle()
-  → mcal_gpio_toggle()
-  → GPIOC ODR/BSRR
-```
-
-BSP chịu trách nhiệm active-low; Application chỉ biết logical `INDICATION_STATUS`.
-
-## 8. SysTick timebase
-
-Luồng thời gian:
-
-```text
-SysTick_Handler
-    ↓
-g_systick_ticks++
-    ↓
-board_timebase_now_ms()
-    ↓
-time_service_now_ms()
-```
-
-Với `BOARD_TIMEBASE_HZ = 1000`, mỗi tick tương ứng 1 ms.
-
-`time_service_periodic_due()` dùng subtraction trên `uint32_t`, nên pattern vẫn hoạt động đúng qua wrap-around miễn period nhỏ hơn vùng ambiguity của counter.
-
-## 9. Application state
-
-Application chỉ cần một timestamp:
+## 4. Compile-Time Configuration
 
 ```c
-static uint32_t g_last_blink_ms;
+#define BOARD_HSE_FREQUENCY_HZ (8000000UL)
+#define BOARD_TARGET_CLOCK_HZ   (72000000UL)
+#define BOARD_TIMEBASE_HZ       (1000UL)
+
+#define APPLICATION_BLINK_PERIOD_MS (500UL)
 ```
 
-Logic:
+The example requires a 1 kHz board timebase so one tick equals one millisecond.
+
+## 5. Startup Flow
 
 ```text
-now - last >= 500 ms?
-    ├─ no  → return
-    └─ yes → update last
-             toggle indication
+Reset_Handler
+    |
+main()
+    |
+disable global IRQ
+    |
+system_init()
+    |
+    +--> board_init()
+    |      +--> try HSE + PLL -> 72 MHz
+    |      +--> fallback to HSI 8 MHz on failure
+    |      +--> board_led_init()
+    |      +--> board_timebase_init(actual SYSCLK)
+    |
+    +--> time_service_init()
+    +--> indication_service_init()
+    +--> application_init()
+    |
+enable global IRQ
+    |
+super-loop
 ```
 
-Không có vòng `for` delay hoặc wait loop trong `application_process()`.
+The global IRQ lifecycle is explicit: SysTick cannot increment until
+`system_init()` completes and interrupts are enabled.
 
-## 10. Kiến trúc
+## 6. Clock Setup
+
+The Board layer requests:
+
+```text
+HSE = 8 MHz
+target SYSCLK = 72 MHz
+```
+
+MCAL RCC configures HSE/PLL. If the external crystal path fails, the board calls
+`mcal_rcc_use_hsi()`.
+
+The active source can be queried through `board_get_clock_source()`.
+
+All timebase configuration uses the actual clock reported by MCAL, not a
+hard-coded 72 MHz assumption.
+
+## 7. GPIO LED
+
+The BSP calls `mcal_gpio_configure()` for PC13.
+
+The active level is defined by the board:
+
+```text
+logical ON -> PC13 LOW
+logical OFF -> PC13 HIGH
+```
+
+Application never sees the pin number or active polarity.
+
+## 8. SysTick Timebase
+
+`board_timebase_init()` calls:
+
+```c
+mcal_systick_init(core_clock_hz, BOARD_TIMEBASE_HZ);
+```
+
+The MCAL programs the Cortex-M3 SysTick registers:
+
+```text
+CTRL
+LOAD
+VAL
+```
+
+and enables:
+
+```text
+CLKSOURCE
+TICKINT
+ENABLE
+```
+
+`SysTick_Handler()` increments a volatile tick counter.
+
+With a 1 kHz timebase, the Service interprets ticks directly as milliseconds.
+
+## 9. Application State
+
+The Application stores the last toggle timestamp.
+
+Every call to `application_process()` asks whether 500 ms has elapsed.
+
+```text
+period due?
+    |
+    +--> no  -> return
+    |
+    +--> yes -> toggle logical indication
+```
+
+No busy delay is used.
+
+## 10. Architecture
 
 ```text
 Application
-   ├──────────────→ Time Service → Board Timebase → MCAL SysTick
-   └──────────────→ Indication Service → Board LED → MCAL GPIO
-                                                   ↓
-                                               Platform
+    |
+    +--> Time Service ------> Board Timebase -----> MCAL SysTick
+    |
+    +--> Indication Service -> Board LED ---------> MCAL GPIO
+                                                       |
+                                                       v
+                                                Platform registers
 ```
-
-Application không include `mcal_gpio.h`, `mcal_systick.h` hoặc STM32 register header.
 
 ## 11. Interrupt
 
-Strong interrupt liên quan example:
+Only SysTick is active.
+
+Ownership:
 
 ```text
-SysTick_Handler
+SysTick core peripheral
+    |
+MCAL SysTick
+    |
+SysTick_Handler()
 ```
 
-ISR chỉ tăng tick counter. Blink decision vẫn chạy ở thread mode.
+The ISR only increments the tick counter.
 
-Các fault handler mạnh (`NMI`, `HardFault`, `MemManage`, `BusFault`, `UsageFault`) đi vào `system_panic()`.
+## 12. Idle and Panic
 
-## 12. Idle và panic
-
-Numbered example dùng:
+The example uses:
 
 ```c
-void system_idle(void)
-{
-    cortex_m3_nop();
-}
+cortex_m3_nop();
 ```
 
-`system_panic()` disable IRQ rồi lặp `NOP`. Đây là lựa chọn debug-friendly cho ST-Link không có NRST; không phải power-saving mode.
+for both normal idle and the panic loop.
 
-## 13. File nên đọc theo thứ tự
+Panic disables global interrupts first.
 
-```text
-app/src/application.c
-services/src/time_service.c
-services/src/indication_service.c
-bsp/bluepill/src/board.c
-bsp/bluepill/src/board_led.c
-bsp/bluepill/src/board_timebase.c
-mcal/src/mcal_rcc.c
-mcal/src/mcal_gpio.c
-mcal/src/mcal_systick.c
-platform/device/stm32f103xb/
-system/system_init.c
-startup/
-linker/
-```
+This is intentionally debug-friendly for an ST-Link connection without NRST.
 
+## 13. Recommended Reading Order
 
-## Build, flash và debug
+1. `app/src/application.c`
+2. `services/src/time_service.c`
+3. `services/src/indication_service.c`
+4. `bsp/bluepill/src/board_led.c`
+5. `bsp/bluepill/src/board_timebase.c`
+6. `mcal/src/mcal_gpio.c`
+7. `mcal/src/mcal_systick.c`
+8. `mcal/src/mcal_rcc.c`
+9. `platform/device/stm32f103xb/include/...`
+10. `system/system_init.c`
 
-Yêu cầu công cụ:
-
-```text
-arm-none-eabi-gcc
-arm-none-eabi-objcopy
-arm-none-eabi-objdump
-arm-none-eabi-size
-GNU Make
-Python 3
-OpenOCD
-arm-none-eabi-gdb hoặc gdb-multiarch
-```
-
-Build:
+## Build, Flash, and Debug
 
 ```bash
 make check-layers
 make clean
 make
-```
-
-Các artifact chính:
-
-```text
-build/firmware.elf
-build/firmware.bin
-build/firmware.hex
-build/firmware.map
-build/firmware.lst
-```
-
-Flash:
-
-```bash
 make flash
 ```
-
-Debug bằng hai terminal:
 
 ```bash
 # Terminal 1
@@ -295,50 +230,46 @@ make debug-server
 make debug
 ```
 
-OpenOCD config dùng SWD, `reset_config none` và adapter speed 1000 kHz.
-
-
-Debug gợi ý:
-
-```gdb
-break SysTick_Handler
-continue
-```
-
-Không nên để breakpoint ISR quá lâu nếu muốn quan sát timing thực tế; có thể halt sau vài giây và inspect `g_systick_ticks` nếu debug symbol cho phép.
-
-
 ## 14. Troubleshooting
 
-### LED không blink
+### LED Does Not Blink
 
-Kiểm tra:
+Check:
 
-- board có nguồn và GND chung với ST-Link,
-- firmware flash thành công,
-- PC13 đúng là LED onboard của board,
-- `SysTick_Handler` là strong symbol,
-- `system_init()` không rơi vào panic,
-- HSE fail vẫn phải fallback HSI, nên blink vẫn có thể hoạt động.
+1. `system_init()` succeeds;
+2. global IRQ is enabled after initialization;
+3. `SysTick_Handler()` is reached;
+4. the SysTick counter increases;
+5. `application_process()` runs continuously;
+6. the logical indication toggles;
+7. PC13 changes level.
 
-### LED luôn sáng hoặc luôn tắt
+### LED Is Always On or Always Off
 
-Kiểm tra active-low mapping và `board_led.c`. Application không nên tự đảo logic active-low.
+Check active-low handling and PC13 configuration.
 
-### Debug khó attach
+Do not "fix" the Application by inverting its logical state. Polarity belongs
+in BSP.
 
-Giữ `system_idle()` bằng `NOP`, OpenOCD `reset_config none`, giảm adapter speed nếu wiring dài/xấu.
+### Debugger Is Difficult to Attach
 
-## 15. Bài tập mở rộng
+Check SWD wiring and confirm OpenOCD uses:
 
-- thay đổi blink period runtime,
-- thêm nhiều software timer,
-- thêm event để đổi blink mode,
-- thêm watchdog,
-- thêm UART log clock source,
-- chuyển idle sang `WFI` và đánh giá ảnh hưởng debug/power.
+```tcl
+reset_config none
+```
 
-## 16. Tài liệu liên quan
+The `NOP` idle/panic policy is intended to keep attach behavior predictable.
+
+## 15. Extension Exercises
+
+- change the blink period;
+- add asymmetric ON/OFF timing;
+- move the LED to another pin without changing Application;
+- replace SysTick with a timer-backed board timebase;
+- expose the active clock source in a debug variable.
+
+## 16. Related Documentation
 
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/porting_guide.md`](docs/porting_guide.md)

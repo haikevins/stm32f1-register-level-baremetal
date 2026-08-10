@@ -1,139 +1,148 @@
-# Kiến trúc — 02-gpio-input-interrupt
+# Architecture — 02-gpio-input-interrupt
 
-## 1. Sơ đồ lớp
+## 1. Layer Diagram
 
 ```text
-                         +------------------+
-PA0 ──> GPIO/EXTI MCAL ─> Board Button ───> Button Service
-                                                 |
-SysTick MCAL ─> Board Timebase ─> Time Service --+
-                                                 |
-                                                 v
-                                            Application
-                                                 |
-                                                 v
-                                      Indication Service
-                                                 |
-                                                 v
-                                            Board LED
-                                                 |
-                                                 v
-                                            MCAL GPIO
-                                                 |
-                                                 v
-                                               PC13
+Application
+    |
+    +--> Event Service
+    +--> Button Service
+    |       |
+    |       +--> Board Button -> MCAL GPIO/EXTI/NVIC
+    |       +--> Time Service -> Board Timebase -> MCAL SysTick
+    |
+    +--> Indication Service -> Board LED -> MCAL GPIO
 ```
 
 ## 2. Ownership
 
-| State/resource | Owner |
+| Concern | Owner |
 |---|---|
-| EXTI pending flags | MCAL EXTI |
-| `g_exti_events` | MCAL EXTI |
-| PA0 mapping | BSP Board Button |
-| debounce timestamp/state | Button Service |
+| PA0 pin/polarity | BSP |
+| GPIO/EXTI registers | MCAL |
+| raw interrupt edge | MCAL/BSP low-level path |
+| debounce | Button Service |
+| event queue | Event Service |
 | LED toggle policy | Application |
-| active-low PC13 | BSP Board LED |
-| SysTick counter | MCAL SysTick |
 
-## 3. Vì sao debounce không nằm trong ISR
+## 3. Why Debounce Is Not in the ISR
 
-Debounce cần chờ thời gian và đọc lại pin. Nếu thực hiện trong ISR sẽ:
+Mechanical bounce lasts much longer than an acceptable ISR.
 
-- kéo dài interrupt latency,
-- block interrupt khác,
-- làm ISR phụ thuộc Time Service/BSP,
-- phá dependency direction,
-- khó kiểm thử và mở rộng.
+Busy-waiting in EXTI0 would:
 
-Do đó ISR chỉ capture edge.
+- block lower-priority interrupts;
+- increase latency;
+- mix physical capture with policy;
+- make timing fragile.
 
-## 4. EXTI event lifecycle
+The ISR records an edge and returns.
+
+## 4. EXTI Event Lifecycle
 
 ```text
-Hardware sets EXTI_PR.PR0
-       ↓
-EXTI0_IRQHandler
-       ↓
-record_pending_lines()
-  ├─ read pending
-  ├─ write 1 to clear
-  └─ set software event bit
-       ↓
-thread mode
-       ↓
-mcal_exti_take_event()
-  ├─ enter critical section
-  ├─ test+clear bit
-  └─ restore PRIMASK
-       ↓
+physical falling edge
+    |
+EXTI pending
+    |
+ISR clears flag + records edge
+    |
 Button Service starts debounce
+    |
+30 ms elapsed
+    |
+sample PA0
+    |
+Event Service publishes pressed event
+    |
+Application consumes event
 ```
 
-## 5. Concurrency model
+## 5. Concurrency Model
 
-Shared data duy nhất trực tiếp giữa ISR/thread trong EXTI path là `g_exti_events`. Critical section trong `mcal_exti_take_event()` bảo vệ thao tác read-modify-clear.
+Interrupt context only publishes low-level edge state.
 
-Debounce state chỉ thuộc thread mode nên không cần volatile/atomic.
+Thread mode performs:
 
-## 6. Initialization order
+- debounce;
+- queue operations;
+- Application policy.
 
-EXTI được configure trong board init trước khi global IRQ enable. Button Service sau đó discard event có thể bị latch trong lúc init.
+Critical sections are used only where an atomic read/clear operation is
+required.
 
-Điểm này tránh một "press giả" ngay khi application bắt đầu.
+## 6. Initialization Order
 
-## 7. Layer boundaries
-
-Application được phép:
-
-```c
-#include "button_service.h"
-#include "indication_service.h"
+```text
+RCC
+    |
+GPIO/AFIO/EXTI/NVIC
+    |
+Timebase
+    |
+Services
+    |
+Application
 ```
 
-Application không được:
+Global IRQ is enabled only after successful initialization.
 
-```c
-#include "mcal_exti.h"
-#include "mcal_gpio.h"
-#include "stm32f103xb.h"
+## 7. Layer Boundaries
+
+Application may include Service headers.
+
+It must not include:
+
+```text
+mcal_exti.h
+mcal_gpio.h
+stm32f103xb.h
+cortex_m3_registers.h
 ```
 
 ## 8. Generic EXTI MCAL
 
-`mcal_exti.c` hỗ trợ line 0..15 và chọn IRQ:
+MCAL EXTI should describe:
 
 ```text
-0    → EXTI0_IRQn
-1    → EXTI1_IRQn
-2    → EXTI2_IRQn
-3    → EXTI3_IRQn
-4    → EXTI4_IRQn
-5..9 → EXTI9_5_IRQn
-10..15 → EXTI15_10_IRQn
+line
+edge
+port mapping
+IRQ behavior
 ```
 
-Các grouped handler gọi cùng `record_pending_lines()` với mask phù hợp.
+without knowing that line 0 is a "user button."
 
-## 9. Failure propagation
+That meaning belongs in BSP.
 
-Nếu GPIO/EXTI/timebase init fail:
+## 9. Failure Propagation
+
+Fatal initialization failure returns upward:
 
 ```text
+MCAL/BSP failure
+    |
 board_init() false
- → system_init() false
- → system_panic()
+    |
+system_init() false
+    |
+system_panic()
 ```
 
-Không cố chạy Application với board resource chưa sẵn sàng.
+Mechanical bounce is not a fatal error; it is a normal Service filtering case.
 
-## 10. Extension strategy
+## 10. Extension Strategy
 
-Muốn thêm button thứ hai:
+Keep richer input behavior above the raw hardware:
 
-- thêm mapping ở BSP,
-- configure EXTI line tương ứng,
-- Button Service giữ debounce state riêng,
-- Application vẫn chỉ consume semantic press.
+```text
+MCAL/BSP raw edge
+    |
+Button Service
+    |
+Event Service
+    |
+Application
+```
 
-Không nên để Application biết line number.
+Add features without pushing product logic downward.

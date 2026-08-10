@@ -1,85 +1,86 @@
 # Porting Guide — 03-uart-polling
 
-## 1. Đổi chân nhưng vẫn USART1
+## 1. Changing Pins While Keeping USART1
 
-STM32F1 pin remap không phải mọi pin đều tự do. Nếu dùng mapping remap của USART1, cần:
+On STM32F1, alternate-function remapping may be required for non-default pins.
 
-- enable AFIO,
-- cấu hình `AFIO_MAPR`,
-- update BSP pins,
-- giữ TX AF push-pull và RX input phù hợp.
+Update BSP pin mapping and AFIO support if necessary.
 
-Không chỉ đổi macro pin nếu hardware mapping không hỗ trợ.
+Keep Application/Service unchanged.
 
-## 2. Đổi sang USART2/USART3
+## 2. Moving to USART2/USART3
 
-Cần cập nhật:
+Update:
 
-1. `mcal_usart_instance_t`,
-2. base address trong `stm32f103xb_memory.h`,
-3. pointer/register mapping,
-4. RCC enable bit,
-5. board pin mapping,
-6. peripheral clock source.
+- peripheral instance;
+- APB bus clock;
+- TX/RX pins;
+- base address/register model if not already present;
+- RCC enable bit.
 
-USART1 nằm APB2; USART2/3 nằm APB1, nên clock argument khác.
+USART2/3 are on APB1 rather than APB2.
 
-## 3. Đổi baud rate
+## 3. Changing Baud Rate
 
-Sửa:
+Change `BOARD_UART_BAUD_RATE`.
 
-```c
-#define BOARD_UART_BAUD_RATE ...
+MCAL should calculate BRR from the active peripheral clock.
+
+Verify the actual baud with a terminal or logic analyzer.
+
+## 4. Changing the Clock Tree
+
+Re-check:
+
+- system clock;
+- APB prescaler;
+- selected USART peripheral clock;
+- BRR formula.
+
+Do not keep a BRR value calculated for 72 MHz.
+
+## 5. Changing Data Format
+
+Extend MCAL configuration for:
+
+- parity;
+- word length;
+- stop bits.
+
+Keep those details below Application.
+
+## 6. Adding a Blocking API with Timeout
+
+If a blocking helper is required, give it an explicit finite timeout.
+
+Keep the non-blocking API available for super-loop use.
+
+## 7. Porting to Another MCU Family
+
+Preserve:
+
+```text
+Application -> UART Service -> BSP
 ```
 
-MCAL tính divider runtime từ peripheral clock.
+Replace MCAL/Platform Device and board pin mapping.
 
-Validation:
+## 8. Post-Port Test
 
-- divider >= 16,
-- divider <= 0xFFFF,
-- actual baud error chấp nhận được.
+- [ ] TX baud correct;
+- [ ] greeting readable;
+- [ ] RX works;
+- [ ] echo works;
+- [ ] HSE and fallback clock both calculate a valid baud if fallback is kept;
+- [ ] no unbounded wait;
+- [ ] layer checker passes.
 
-## 4. Đổi clock tree
+## 9. Common Pitfalls
 
-Không hard-code 72 MHz trong UART driver. Bảo đảm RCC layer trả đúng bus clock thực tế.
-
-Nếu APB prescaler thay đổi, USART clock **không** dùng quy tắc timer x2.
-
-## 5. Đổi data format
-
-Hiện code dựa reset defaults cho 8N1/no parity. Muốn 9-bit/parity/stop khác cần mở rộng MCAL config/API và thêm CR1/CR2 bit definitions.
-
-Không đưa format-specific register bits vào Service.
-
-## 6. Thêm timeout blocking API
-
-Không nên thay `try_*` bằng hidden busy-wait nếu muốn giữ architecture non-blocking. Nếu cần blocking wrapper, đặt ở tầng có policy timeout rõ ràng và document latency.
-
-## 7. Port sang MCU family khác
-
-Giữ Service API, thay:
-
-- device register map,
-- USART MCAL,
-- RCC/clock query,
-- BSP pin AF setup.
-
-## 8. Test sau port
-
-- greeting đúng ký tự,
-- echo hai chiều,
-- baud đo bằng logic analyzer nếu cần,
-- RX/TX counters tăng,
-- error flags bằng 0 trong điều kiện sạch,
-- layer checker pass,
-- USART IRQ vẫn weak nếu vẫn polling.
-
-## 9. Common pitfalls
-
-- nối TX-TX thay vì TX-RX,
-- dùng UART adapter 5 V,
-- nhầm PCLK1/PCLK2,
-- quên AF output mode,
-- không đọc DR sau error,
-- dùng blocking loop khiến super-loop treo.
+- TX connected to TX;
+- no common ground;
+- wrong APB clock;
+- wrong BRR formula;
+- wrong alternate-function mapping;
+- using 5 V logic;
+- blocking forever on TXE/RXNE.

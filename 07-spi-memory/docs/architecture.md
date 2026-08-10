@@ -1,119 +1,166 @@
-# Kiến trúc — 07-spi-memory
+# Architecture — 07-spi-memory
 
-## 1. Dependency graph
+## 1. Dependency Graph
 
 ```text
 Application
-   ├────────> Memory Service
-   │             ├────────> W25Q64 ECUAL
-   │             │             ↑ transport
-   │             └────────> Board Memory Bus
-   │                              ├─> MCAL SPI
-   │                              └─> MCAL GPIO
-   │
-   ├────────> Time Service → Board Timebase → MCAL SysTick
-   └────────> Indication Service → Board LED → MCAL GPIO
+    |
+Memory Service
+   / \
+  /   \
+W25Q64 ECUAL   Board Memory Bus
+                    |
+                MCAL SPI/GPIO
+                    |
+              Platform Device
 ```
 
-## 2. Composition của external-device driver
+Time and Indication Services are separate Application dependencies.
 
-ECUAL và BSP là sibling layers theo dependency checker; ECUAL không include BSP.
+## 2. External-Device Driver Composition
 
-Vì vậy Service tạo transport:
+The design separates three concerns:
 
 ```text
-Board transfer/select/deselect callbacks
-              ↓
-         W25Q64 ECUAL
+Application storage policy
+W25Q64 command/geometry semantics
+STM32 SPI/CS implementation
 ```
 
-Đây là pattern tái sử dụng tốt cho EEPROM, sensor, display hoặc radio driver.
+The Memory Service is the composition point.
 
-## 3. Ownership table
+## 3. Ownership Table
 
 | Concern | Owner |
 |---|---|
-| Destructive self-test policy | Application |
-| Memory semantic API | Memory Service |
-| W25Q64 commands/geometry | ECUAL |
-| SPI1/PA4..PA7 mapping | BSP |
-| CS behavior | BSP |
-| SPI registers | MCAL SPI |
-| GPIO registers | MCAL GPIO |
-| system/bus clocks | MCAL RCC |
-| heartbeat timing | Time Service/SysTick |
+| destructive self-test | Application |
+| logical memory API | Memory Service |
+| JEDEC/status/erase/program/read | W25Q64 ECUAL |
+| PA4..PA7 | BSP |
+| SPI register operation | MCAL SPI |
+| GPIO register operation | MCAL GPIO |
+| register layout | Platform Device |
 
-## 4. Synchronous transaction model
+## 4. Synchronous Transaction Model
 
-Service/ECUAL API hiện synchronous:
+Read/erase/program APIs are synchronous.
 
-```text
-call erase
-  → function không return cho tới khi BUSY clear hoặc poll limit hit
-```
+They return only after the SPI command and, where required, internal BUSY
+polling completes.
 
-Điều này chấp nhận được cho startup self-test nhưng có latency lớn. Production super-loop có thể cần asynchronous state machine.
+This keeps the example simple but means long flash operations occupy thread
+mode for a bounded interval.
 
-## 5. Poll limits vs timeouts
+## 5. Poll Limits vs Timeouts
 
-W25Q64 busy wait dùng iteration limits vì operation nằm trong init phase khi global IRQ disabled. Đây là architectural constraint của lifecycle hiện tại.
+Unlike the SPL variant of this roadmap, this register-level project uses
+iteration poll limits for W25Q64 BUSY completion during startup.
 
-Nếu chuyển erase/program sang runtime thread mode, có thể dùng Time Service để có timeout theo milliseconds.
-
-## 6. Hardware transaction boundary
-
-`board_memory_bus_select/deselect()` định nghĩa transaction ownership. ECUAL bảo đảm:
+Reason:
 
 ```text
-one command = one or more transfer calls inside one CS-low window
+global IRQ disabled during system_init()
 ```
 
-MCAL SPI không tự điều khiển CS.
+so SysTick-based timeouts cannot safely advance.
 
-Điều này cho phép bus SPI share với device khác, miễn BSP/service arbitration được thiết kế thêm.
+## 6. Hardware Transaction Boundary
 
-## 7. Read/write semantics
+BSP owns CS and calls MCAL SPI.
 
-`w25q64_read` là non-destructive nhưng synchronous.
+ECUAL decides command structure.
 
-`page_program` và `sector_erase`:
+```text
+ECUAL: which bytes?
+BSP: when is CS active?
+MCAL: how are bytes clocked?
+```
 
-- validate range,
-- wait ready,
-- WREN + WEL verify,
-- issue command,
-- wait completion.
+## 7. Read/Write Semantics
 
-## 8. Error propagation
+Read:
 
-MCAL transfer false
- → BSP false
- → ECUAL false
- → Service false
- → Application increments error
+- non-destructive;
+- address range validated.
 
-Không có exception/global error manager.
+Program:
+
+- Write Enable required;
+- page boundary enforced;
+- BUSY polled.
+
+Erase:
+
+- sector aligned;
+- Write Enable required;
+- BUSY polled.
+
+## 8. Error Propagation
+
+Example chain:
+
+```text
+MCAL SPI timeout
+    |
+board transfer false
+    |
+W25Q64 operation false
+    |
+Memory Service false
+    |
+Application diagnostic/error state
+```
+
+JEDEC initialization failure propagates to `system_panic()`.
 
 ## 9. Concurrency
 
-SPI path không dùng ISR, nên không có concurrent transfer trong example. Nếu thêm task/device khác dùng cùng SPI1, cần bus ownership/arbitration ở tầng phù hợp.
+SPI1 is single-owner and thread-driven in this example.
 
-## 10. Startup safety
+No SPI IRQ and no shared-bus arbitration are required.
 
-Board init delay sử dụng busy delay vì global IRQ disabled. Sau đó memory init/self-test cũng không cần SysTick để timeout.
+If another device shares SPI1, explicit bus ownership must be added.
 
-Heartbeat chỉ bắt đầu sau `main()` enable IRQ.
+## 10. Startup Safety
 
-## 11. Destructive boundary
+Startup:
 
-Sector test address là Application config, không hard-code trong ECUAL. W25Q64 driver chỉ cung cấp erase/program primitives.
+```text
+clock
+GPIO/CS
+SPI
+power-on busy delay
+JEDEC
+self-test
+enable global IRQ
+```
 
-Đây là separation quan trọng: device driver không quyết định dữ liệu nào được phép xóa.
+No step before global IRQ enable depends on SysTick.
 
-## 12. Extension strategy
+## 11. Destructive Boundary
 
-- filesystem/log policy → Service/Application,
-- W25Qxx protocol → ECUAL,
-- shared SPI bus → BSP/bus service,
-- SPI DMA → MCAL,
-- alternate MCU → Platform/MCAL/BSP.
+The final 4 KiB sector is reserved for the demo:
+
+```text
+0x007FF000 .. 0x007FFFFF
+```
+
+Future application data must not overlap that area.
+
+## 12. Extension Strategy
+
+For richer storage:
+
+```text
+Application
+    |
+Storage/Record Service
+    |
+Memory Service
+    |
+W25Q64 ECUAL
+    |
+Board SPI transport
+```
+
+Keep page/sector geometry below high-level record policy.

@@ -1,138 +1,116 @@
 # Porting Guide — 08-adc-dma
 
-## 1. Đổi ADC input pin/channel
+## 1. Changing ADC Input Pin/Channel
 
-PA0 = ADC1_IN0 hiện tại.
+Update both BSP pin mapping and ADC channel number.
 
-Để đổi:
+Verify the selected STM32 pin actually maps to that ADC channel.
 
-1. xác định GPIO có ADC channel mapping,
-2. update BSP pin,
-3. truyền channel mới vào MCAL ADC init,
-4. bảo đảm sample-time register đúng nhóm channel,
-5. giữ pin analog mode.
+## 2. Changing Sample Rate
 
-Hiện `board_adc_dma_init()` truyền channel `0U` trực tiếp; nên khi port cần biến nó thành board constant nếu muốn generic hơn.
-
-## 2. Đổi sample rate
-
-Sửa:
+Change:
 
 ```c
 BOARD_ADC_SAMPLE_RATE_HZ
 ```
 
-Timer contract yêu cầu:
+Verify timer divisibility and that ADC conversion time can complete before the
+next trigger.
 
-```text
-BOARD_ADC_TRIGGER_TIMER_TICK_HZ % sample_rate == 0
-```
+## 3. Changing the Timer Trigger
 
-và PSC/ARR phải fit 16 bit.
+Verify the selected timer/TRGO source is supported by the STM32F103 ADC external
+trigger selection.
 
-## 3. Đổi timer trigger
+Update MCAL trigger selection and BSP composition.
 
-ADC external-trigger selection hiện hỗ trợ TIM3 TRGO duy nhất trong enum/MCAL.
-
-Muốn timer khác:
-
-- thêm trigger enum,
-- thêm ADC EXTSEL bit mapping,
-- tạo/extend timer trigger MCAL,
-- update BSP composition.
-
-## 4. Đổi DMA buffer size
-
-Sửa:
-
-```c
-BOARD_ADC_DMA_BUFFER_SAMPLE_COUNT
-```
+## 4. Changing DMA Buffer Size
 
 Requirements:
 
-- >= 2,
-- even,
-- <= 65535.
-
-Block size luôn half buffer theo macro.
-
-Lưu ý RAM tăng ở ít nhất DMA buffer + completed block + Service sample array.
-
-## 5. Đổi DMA channel
-
-ADC1 mapping trên STM32F103 dùng DMA1 Channel 1 trong design hiện tại. MCU khác có DMA request routing khác; cần thay MCAL DMA, IRQ mapping và BSP.
-
-## 6. Đổi ADC clock limit
-
-Config đang dùng 12 MHz dù compile guard chỉ kiểm tra không >14 MHz. Khi port, chọn max phù hợp MCU/accuracy requirement và bảo đảm prescaler set có thể tạo clock <= max.
-
-## 7. Đổi reference voltage
-
-Sửa:
-
-```c
-BOARD_ADC_REFERENCE_MV
+```text
+>= 2
+even
+fits DMA CNDTR
 ```
 
-chỉ thay scaling estimate. Nếu cần accuracy, đo/calibrate VDDA hoặc dùng reference channel strategy; không coi macro 3300 là measurement thực.
+Block size remains half the circular buffer unless the design is changed.
 
-## 8. Multi-channel ADC
+Recalculate block period and SRAM use.
 
-Cần thiết kế lại:
+## 5. Changing DMA Channel
 
-- SQR sequence,
-- scan mode,
-- sample times từng channel,
-- DMA buffer layout,
-- ADC Service aggregation.
+ADC1-to-DMA channel mapping is fixed by the MCU.
 
-Không chỉ tăng DMA buffer.
+Do not choose a DMA channel arbitrarily.
 
-## 9. Đổi IRQ priority
+## 6. Changing the ADC Clock Limit
 
-`BOARD_ADC_DMA_IRQ_PRIORITY` hiện = 1. Khi ghép UART/EXTI khác, tạo priority plan toàn hệ thống.
+The project target limit is 12 MHz, below the STM32F103 absolute maximum used
+by the compile-time guard.
 
-## 10. Refactor ISR ownership
+If changing this policy, verify datasheet timing and selected prescaler.
 
-Current code đặt DMA handler tại BSP composite pipeline. Nếu coding standard yêu cầu peripheral ISR nằm MCAL:
+## 7. Changing Reference Voltage
 
-- MCAL handler có thể capture DMA events/block-half ID,
-- BSP/Service poll event trong thread mode,
-- không callback upward từ ISR.
+Change `BOARD_ADC_REFERENCE_MV` only if the assumption is appropriate.
 
-Phải giữ data-race safety khi thay design.
+For accurate measurements, measure/calibrate VDDA instead.
 
-## 11. Validation bằng oscilloscope/debug pin
+## 8. Multi-Channel ADC
 
-Để xác minh sample rate chính xác, có thể tạm thời:
+Add sequence ranks and scan support.
 
-- route TIM3 output/trigger ra pin nếu hardware mapping cho phép,
-- hoặc toggle debug GPIO ở block event (chỉ trong diagnostic build).
+Define clearly how interleaved samples map to channels before changing the
+Service.
 
-Không nên giữ toggle nặng trong production ISR.
+## 9. Changing IRQ Priority
 
-## 12. Validation checklist
+Review all system interrupts.
 
-- PA0 analog,
-- ADC clock hợp lệ,
-- calibration hoàn tất,
-- TIM3 update 1 kHz,
-- DMA CNDTR reload circular,
-- HT/TC xen kẽ,
-- sequence tăng,
-- no DMA error,
-- no overrun với normal load,
-- LED hysteresis đúng.
+DMA service latency must remain short enough to prevent published-block
+overruns.
 
-## 13. Common pitfalls
+## 10. Refactoring ISR Ownership
 
-- nhầm timer input clock với PCLK1,
-- ADC clock quá cao,
-- quên ADC calibration,
-- sample time không phù hợp source impedance,
-- DMA width sai,
-- CPAR không trỏ ADC DR,
-- CNDTR không đúng,
-- xử lý block chậm hơn producer,
-- scale mV giả định VDDA chính xác.
+If DMA becomes a reusable subsystem, the handler may move to a lower generic
+owner.
+
+Preserve the rule that the strong handler belongs to the lowest module owning
+DMA1 Channel 1.
+
+## 11. Validation with an Oscilloscope/Debug Pin
+
+A spare debug pin can be toggled on block publication to measure cadence.
+
+At 1 kHz sampling and 32-sample blocks:
+
+```text
+block cadence ~= 32 ms
+```
+
+## 12. Validation Checklist
+
+- [ ] pin/channel mapping correct;
+- [ ] ADC clock within limit;
+- [ ] calibration completes;
+- [ ] TIM3 trigger rate correct;
+- [ ] DMA1 CH1 active;
+- [ ] HT/TC events alternate;
+- [ ] sequence increments;
+- [ ] error count zero;
+- [ ] overrun zero at normal load;
+- [ ] raw values follow voltage;
+- [ ] hysteresis works.
+
+## 13. Common Pitfalls
+
+- GPIO not in analog mode;
+- wrong ADC channel;
+- ADC clock too fast;
+- wrong external trigger selection;
+- wrong DMA channel;
+- circular mode missing;
+- statistics inside ISR;
+- critical section too long;
+- assuming VDDA is exactly 3.300 V.

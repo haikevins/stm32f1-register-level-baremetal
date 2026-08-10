@@ -1,135 +1,108 @@
 # Porting Guide — 01-blink-led
 
-## 1. Mục tiêu port
+## 1. Porting Goal
 
-Giữ nguyên Application:
-
-```text
-time_service_periodic_due()
-indication_service_toggle()
-```
-
-và thay phần board/hardware bên dưới.
-
-## 2. Port sang Blue Pill khác cùng STM32F103
-
-Nếu LED vẫn PC13 và crystal vẫn 8 MHz thì không cần thay behavior. Chỉ kiểm tra:
-
-- board variant có LED active-low hay không,
-- HSE thực tế có 8 MHz,
-- SWD wiring.
-
-## 3. Đổi LED sang pin khác
-
-Sửa:
+Preserve:
 
 ```text
-bsp/bluepill/include/board_pins.h
+Application -> Time Service / Indication Service
 ```
 
-Ví dụ:
+while replacing only the hardware-specific layers required by the new target.
 
-```c
-#define BOARD_STATUS_LED_PORT MCAL_GPIO_PORT_B
-#define BOARD_STATUS_LED_PIN  (0U)
-```
+## 2. Porting to Another Blue Pill with the Same STM32F103
 
-Nếu active-high, đổi `BOARD_STATUS_LED_ACTIVE_LEVEL`.
+No source changes should be required if:
 
-Không sửa `application.c`.
+- onboard LED is still PC13;
+- HSE is 8 MHz;
+- SWD wiring is unchanged.
 
-## 4. Đổi system clock
+Still verify real hardware because clone boards can differ.
 
-Sửa:
+## 3. Moving the LED to Another Pin
 
-```c
-BOARD_HSE_FREQUENCY_HZ
-BOARD_TARGET_CLOCK_HZ
-```
+Change BSP pin mapping and polarity.
 
-Sau đó kiểm tra:
+MCAL GPIO should remain generic.
 
-- PLL multiplier có hợp lệ với implementation hiện tại,
-- target không vượt giới hạn STM32F103,
-- Flash latency,
-- APB1 limit,
-- SysTick reload chia hết cho `BOARD_TIMEBASE_HZ`.
+Application and Indication Service should not change.
 
-## 5. Đổi timebase frequency
+## 4. Changing the System Clock
 
-`time_service` hiện hiểu tick là milliseconds vì config enforce 1 kHz. Nếu muốn 100 Hz hoặc 10 kHz, cần thay contract BSP/Service hoặc conversion logic, không chỉ đổi macro.
+Update RCC configuration and verify:
 
-## 6. Đổi sang timer thay SysTick
+- oscillator source;
+- PLL multiplier;
+- flash wait-state handling;
+- APB limits;
+- reported system clock.
 
-Tạo:
+Board Timebase must receive the actual resulting SYSCLK.
+
+## 5. Changing the Timebase Frequency
+
+If Service APIs are still in milliseconds, preserve a 1 kHz logical timebase or
+add explicit conversion.
+
+Do not silently reinterpret ticks as milliseconds after changing tick rate.
+
+## 6. Replacing SysTick with a Timer
+
+Replace Board Timebase/MCAL implementation.
+
+Keep the Time Service API unchanged if it still reports milliseconds.
+
+## 7. Porting to Another STM32F1 MCU
+
+Review:
+
+- RCC differences;
+- GPIO register layout;
+- memory map;
+- startup vectors;
+- flash/RAM size;
+- SysTick compatibility.
+
+## 8. Porting to Another MCU Family
+
+Keep Application/Services.
+
+Replace BSP, MCAL, Platform Device, startup, linker, and clock logic.
+
+Platform Architecture may remain partly reusable for another Cortex-M.
+
+## 9. Validation Checklist
+
+- [ ] reset reaches `main`;
+- [ ] RCC reports expected clock;
+- [ ] fallback still works if intended;
+- [ ] SysTick runs at 1 kHz;
+- [ ] PC13 logical OFF is correct;
+- [ ] LED toggles every 500 ms;
+- [ ] layer checker passes;
+- [ ] debugger attaches reliably.
+
+## 10. Common Mistakes
+
+- moving pin logic into Application;
+- forgetting active-low polarity;
+- hard-coding a 72 MHz SysTick reload;
+- changing SYSCLK without updating peripheral clocks;
+- using a blocking delay in Application.
+
+## 11. Target State After Porting
+
+The final dependency should still be:
 
 ```text
-mcal_timer_timebase.*
-board_timebase.*
+Application
+    |
+Services
+    |
+new BSP
+    |
+new MCAL
+    |
+new/updated Platform
 ```
-
-Giữ API:
-
-```c
-uint32_t board_timebase_now_ms(void);
-```
-
-Application và Time Service có thể giữ nguyên.
-
-## 7. Port sang MCU STM32F1 khác
-
-Cần rà:
-
-- linker Flash/RAM size,
-- vector table/IRQ count,
-- GPIO register layout,
-- RCC PLL/clock tree,
-- peripheral base addresses.
-
-Nếu vẫn Cortex-M3, phần architecture core có thể tái sử dụng đáng kể.
-
-## 8. Port sang MCU family khác
-
-Thay:
-
-```text
-platform/device/
-mcal/
-startup/
-linker/
-```
-
-Có thể cần đổi cả `platform/arch/` nếu core không phải Cortex-M3.
-
-## 9. Validation checklist
-
-Sau port:
-
-```bash
-make check-layers
-make clean
-make
-make size
-```
-
-Kiểm tra runtime:
-
-- `main` được hit bằng GDB,
-- SysTick ISR chạy,
-- LED default OFF đúng polarity,
-- toggle period đúng,
-- HSE fallback không làm firmware treo,
-- fault path vẫn debug được.
-
-## 10. Sai lầm thường gặp
-
-- hard-code `GPIOC` trong Service,
-- đổi pin nhưng quên clock enable port,
-- đổi clock nhưng giữ SysTick reload cũ,
-- đảo active-low ở Application,
-- dùng delay loop dựa trên CPU clock,
-- bỏ layer checker vì project nhỏ.
-
-## 11. Mục tiêu sau khi port
-
-Nếu Application và Services không đổi mà firmware vẫn blink đúng, port boundary đã được giữ tốt.

@@ -1,118 +1,99 @@
 # Porting Guide — 06-i2c-display
 
-## 1. Đổi địa chỉ OLED
+## 1. Changing the OLED Address
 
-Sửa:
+Change:
 
 ```c
 BOARD_DISPLAY_I2C_ADDRESS_7BIT
 ```
 
-Dùng 7-bit address, không truyền giá trị đã shift trái.
+Keep it as a 7-bit address.
 
-## 2. Đổi bus speed
+## 2. Changing Bus Speed
 
-Sửa:
+Update the requested I2C clock.
+
+MCAL recalculates CCR/TRISE from actual PCLK1.
+
+Verify rise time and device support.
+
+## 3. Changing I2C Pins
+
+Update BSP pin mapping.
+
+If moving away from default I2C1 pins, add AFIO remap support as required.
+
+## 4. Changing OLED Controller
+
+Keep the Board Display Bus.
+
+Replace ECUAL and adapt Display Service only if logical drawing semantics
+change.
+
+## 5. Changing Resolution
+
+Review:
+
+- framebuffer size;
+- page count;
+- address window;
+- clipping;
+- layout constants.
+
+## 6. Adding a Reset Pin
+
+Map reset in BSP and provide a board-level reset operation.
+
+Keep reset polarity/pin details out of ECUAL/Application where possible.
+
+## 7. Changing Power-On Delay
+
+Adjust:
 
 ```c
-BOARD_DISPLAY_I2C_CLOCK_HZ
+BOARD_DISPLAY_POWER_ON_DELAY_MS
 ```
 
-Driver hỗ trợ tối đa 400 kHz theo guard hiện tại.
+The startup delay must remain independent from SysTick while IRQ is disabled.
 
-Sau đổi kiểm tra:
+## 8. Porting to Another MCU
 
-- PCLK1 1..36 MHz,
-- `CR2.FREQ`,
-- CCR không vượt 12-bit,
-- TRISE hợp lệ,
-- signal integrity/pull-up.
+Keep Display Service/SSD1306 ECUAL.
 
-## 3. Đổi I2C pins
+Replace BSP, MCAL I2C/GPIO, and Platform Device.
 
-PB6/PB7 là default I2C1 mapping. Nếu remap hoặc I2C2:
+## 9. Verification Checklist
 
-- update BSP pins,
-- update peripheral instance MCAL,
-- RCC clock/reset bits,
-- base address,
-- AFIO remap nếu cần,
-- bus clock source.
+- [ ] SDA/SCL idle HIGH;
+- [ ] correct address;
+- [ ] SCL frequency valid;
+- [ ] START/address ACK/data/STOP correct;
+- [ ] display initialization succeeds;
+- [ ] framebuffer update succeeds;
+- [ ] error counter remains zero.
 
-## 4. Đổi controller OLED
+## 10. Logic Analyzer Checklist
 
-Nếu là SH1106 hoặc panel geometry khác, không chỉ đổi address. Tạo ECUAL driver mới hoặc parameterize:
-
-- init commands,
-- page/column addressing,
-- resolution,
-- framebuffer width/height.
-
-## 5. Đổi resolution
-
-Hiện macros:
-
-```c
-SSD1306_WIDTH  = 128
-SSD1306_HEIGHT = 64
-```
-
-Frame buffer size và addressing commands phụ thuộc các giá trị này, nhưng init multiplex/COM config hiện hard-code 64-row profile. Cần cập nhật đồng bộ.
-
-## 6. Thêm reset pin
-
-Module 4-pin không có reset. Nếu board khác expose RESET:
-
-- map pin ở BSP,
-- tạo reset sequence BSP,
-- giữ SSD1306 device protocol độc lập nếu có thể.
-
-## 7. Thay power-on delay
-
-Hiện init chạy khi IRQ disabled nên delay callback phải hoạt động không cần interrupt.
-
-Nếu chuyển init sau global IRQ enable, có thể dùng timebase, nhưng phải document lifecycle rõ.
-
-## 8. Port sang MCU khác
-
-Giữ SSD1306 ECUAL và Display Service; thay:
-
-- MCAL I2C,
-- GPIO AF mapping,
-- RCC,
-- BSP.
-
-## 9. Verification checklist
-
-- bus idle high,
-- START/address ACK,
-- control byte 0x00 command ACK,
-- control byte 0x40 data ACK,
-- screen init,
-- full-frame update,
-- runtime error count = 0,
-- I2C IRQ handlers vẫn weak nếu polling.
-
-## 10. Logic analyzer checklist
-
-Decode I2C:
+Capture:
 
 ```text
-address 0x3C write
-0x00 + commands
-...
-address 0x3C write
-0x40 + framebuffer
+START
+address + W
+ACK
+control byte
+payload
+STOP
 ```
 
-Nếu analyzer hiển thị 0x78, kiểm tra tool đang hiển thị 8-bit address byte hay 7-bit address.
+Verify `0x00` for command and `0x40` for data.
 
-## 11. Common pitfalls
+## 11. Common Pitfalls
 
-- nhầm 0x3C với 0x78,
-- thiếu pull-up,
-- dùng push-pull cho SCL/SDA,
-- clear ADDR sai sequence,
-- STOP trước BTF cuối,
-- dùng SysTick delay khi IRQ còn disabled,
-- full-frame update quá nhanh làm chiếm bus.
+- 8-bit address used instead of 7-bit;
+- missing pull-ups;
+- push-pull instead of open-drain;
+- swapped SDA/SCL;
+- SysTick-based startup delay before IRQ enable;
+- unbounded I2C polling;
+- wrong HSI fallback timing.

@@ -1,122 +1,141 @@
-# Kiến trúc — 04-uart-interrupt-ring-buffer
+# Architecture — 04-uart-interrupt-ring-buffer
 
-## 1. Dependency graph
+## 1. Dependency Graph
 
 ```text
 Application
-    ↓
-Serial Service
-    ↓
+    |
+UART Service
+    |
 Board UART
-    ↓
+    |
 MCAL USART
-    ├─ USART1 register access
-    ├─ NVIC setup
-    ├─ RX ring
-    ├─ TX ring
-    ├─ error/overflow counters
-    └─ USART1_IRQHandler
-    ↓
-Platform device/architecture
+    |
+Platform USART/NVIC registers
 ```
 
-## 2. State ownership
+## 2. State Ownership
 
-| State | Writer chính | Reader chính |
-|---|---|---|
-| RX head | ISR | thread observes |
-| RX tail | thread | ISR observes |
-| TX head | thread | ISR observes |
-| TX tail | ISR | thread observes |
-| USART error flags | ISR | thread take/clear |
-| RX overflow counter | ISR | thread take/clear |
-| Greeting/echo state | Application | Application |
-
-## 3. SPSC reasoning
-
-RX và TX ring gần với single-producer/single-consumer:
-
-- RX producer = ISR, consumer = thread,
-- TX producer = thread, consumer = ISR.
-
-Điều này giảm số critical section cần thiết. Tuy nhiên TX "kick" (`TXEIE`) là register state có thể bị cả ISR/thread thay đổi nên enqueue dùng critical section.
-
-## 4. RX flow
+RX:
 
 ```text
-Wire → USART shift register → DR/RXNE
-                          ↓ IRQ
-                    USART1_IRQHandler
-                          ↓
-                     RX ring
-                          ↓
-              serial_service_try_read
-                          ↓
-                     Application
+ISR owns producer/head updates
+thread owns consumer/tail updates
 ```
 
-## 5. TX flow
+TX:
+
+```text
+thread owns producer/head updates
+ISR owns consumer/tail updates
+```
+
+This explicit ownership is the core concurrency rule.
+
+## 3. SPSC Reasoning
+
+A single-producer/single-consumer ring avoids a full mutex when each index has
+one writer.
+
+Shared index reads still require careful ordering/atomicity.
+
+The MCAL design restricts buffer sizes so 16-bit index arithmetic remains
+valid.
+
+## 4. RX Flow
+
+```text
+USART hardware
+    |
+ISR
+    |
+RX ring
+    |
+MCAL read API
+    |
+Board/Service
+    |
+Application
+```
+
+## 5. TX Flow
 
 ```text
 Application
-    ↓ try_write
+    |
+Service/Board
+    |
+MCAL write API
+    |
 TX ring
-    ↓ enable TXEIE
-USART1_IRQHandler
-    ↓
-DR → shift register → wire
+    |
+ISR
+    |
+USART DR
 ```
 
-## 6. Interrupt rules
+## 6. Interrupt Rules
 
-ISR được phép:
+The ISR may:
 
-- snapshot `SR`,
-- read/write `DR`,
-- advance ring index,
-- set counters,
-- enable/disable TXEIE.
+- read/clear status;
+- move bytes;
+- update counters;
+- enable/disable TX interrupt.
 
-ISR không được:
+It must not perform echo policy or call Application.
 
-- call Service/Application,
-- format text,
-- echo,
-- debounce,
-- allocate.
+## 7. Error Semantics
 
-## 7. Error semantics
-
-Hardware receive error và software queue overflow là hai domain khác nhau, vì vậy có hai API/state riêng. Điều này làm debug tốt hơn so với một generic "UART failed" flag.
-
-## 8. API backpressure
-
-`try_write_byte()` trả false khi TX ring full. Đây là backpressure rõ ràng. Application quyết định giữ pending byte thay vì MCAL block.
-
-`try_read_byte()` false khi RX ring empty.
-
-## 9. Buffer capacity
-
-Size phải power-of-two vì index wrap dùng mask. Một slot để trống:
+Two categories are separate:
 
 ```text
-effective capacity = configured size - 1
+hardware receive error
+software ring overflow
 ```
 
-Nếu đổi implementation sang count-based ring, contract/capacity cần document lại.
+Keeping them separate makes diagnosis more meaningful.
 
-## 10. Initialization safety
+## 8. API Backpressure
 
-Global IRQ disable trong `main` trước `system_init()`. MCAL có thể configure NVIC/USART an toàn mà handler chưa chạy giữa chừng. Sau khi toàn bộ state reset và Application init hoàn tất, global IRQ mới enable.
+A non-blocking write can fail when the TX ring is full.
 
-## 11. Clock boundary
+That failure is backpressure to thread mode.
 
-BSP truyền PCLK2 thực tế cho MCAL. MCAL không biết board crystal. Đây là separation quan trọng để HSI fallback vẫn tạo baud divider phù hợp.
+Application/Service decides whether to retry, retain a pending byte, or drop.
 
-## 12. Extension points
+## 9. Buffer Capacity
 
-- Parser protocol: Service/Application, không ISR.
-- Framing buffer: Service.
-- DMA UART: MCAL/BSP mới, giữ Serial Service contract nếu phù hợp.
-- Flow control CTS/RTS: BSP + MCAL.
-- Multiple USART: mở rộng instance mapping trong MCAL/BSP.
+Buffer storage is statically allocated and compile-time validated.
+
+Power-of-two capacity allows efficient index masking.
+
+Static allocation makes SRAM cost explicit.
+
+## 10. Initialization Safety
+
+Rings and counters must be initialized before USART IRQ can run.
+
+Global IRQ is disabled during system initialization, which prevents an early
+handler from observing partially initialized state.
+
+## 11. Clock Boundary
+
+USART BRR remains an MCAL concern.
+
+Board provides actual PCLK2.
+
+Application knows only the requested baud rate.
+
+## 12. Extension Points
+
+Possible extensions:
+
+- protocol parser Service;
+- line-oriented input;
+- DMA-backed UART;
+- larger buffers;
+- flow control;
+- multiple USART instances.
+
+Preserve the same ownership model.

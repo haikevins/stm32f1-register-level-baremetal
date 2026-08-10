@@ -1,81 +1,85 @@
-# Kiến trúc — 05-timer-pwm
+# Architecture — 05-timer-pwm
 
-## 1. Dependency graph
+## 1. Dependency Graph
 
 ```text
 Application
-   ├─> Time Service → Board Timebase → MCAL SysTick → Cortex-M3
-   └─> PWM Service  → Board PWM      → MCAL Timer
-                                         └─> MCAL GPIO
-                                              ↓
-                                           Platform
+    |
+    +--> PWM Service ------> Board PWM ------> MCAL Timer/GPIO
+    |
+    +--> Time Service -----> Board Timebase -> MCAL SysTick
 ```
 
 ## 2. Ownership
 
-| Concern | Owner |
-|---|---|
-| Fade direction/step | Application |
-| Duty unit/clamp | PWM Service |
-| PA0/TIM2_CH1 mapping | BSP |
-| PSC/ARR/CCR/PWM mode | MCAL Timer |
-| APB timer clock | MCAL RCC |
-| 1 ms tick | MCAL SysTick |
+Application owns the breathing waveform policy.
 
-## 3. Hardware vs software timing
+PWM Service owns the logical duty API.
 
-Hai time domain độc lập:
+BSP owns PA0/TIM2_CH1 mapping.
 
-```text
-TIM2 = waveform generation 1 kHz
-SysTick = application update scheduler 1 kHz tick
-```
+MCAL owns timer/GPIO registers and clock-to-register conversion.
 
-PWM không phụ thuộc việc Application chạy đúng từng microsecond. CPU chỉ cập nhật duty thưa hơn.
+## 3. Hardware vs Software Timing
 
-## 4. Why permille at Service boundary
-
-Service không expose raw CCR:
-
-- raw CCR phụ thuộc ARR,
-- Application không cần biết timer resolution,
-- 0..1000 portable hơn,
-- dễ clamp.
-
-Đây là ví dụ chuyển từ hardware unit sang semantic unit.
-
-## 5. Clock ownership
-
-Application không biết SYSCLK/PCLK1. BSP lấy actual timer clock từ RCC và truyền xuống MCAL. MCAL chỉ cần:
+Two time domains exist:
 
 ```text
-timer_clock_hz
-timer_tick_hz
-pwm_frequency_hz
+1 kHz carrier -> TIM2 hardware
+10 ms duty update -> thread mode
 ```
 
-## 6. Preload semantics
+Only the second depends on the super-loop.
 
-MCAL bật `OC1PE` và `ARPE`; Service chỉ gọi set duty. Application không cần biết latch timing.
+## 4. Why Permille at the Service Boundary
 
-## 7. ISR policy
+Permille is independent from:
 
-TIM2 không interrupt. SysTick ISR thuộc MCAL SysTick và chỉ tăng counter.
+- timer width;
+- ARR value;
+- input clock;
+- target PWM frequency.
 
-## 8. Failure handling
+This keeps Application reusable.
 
-Nếu timer clock không chia hết timer tick hoặc tick không chia hết PWM frequency, MCAL init fail. `system_init()` propagate fail tới `system_panic()`.
+## 5. Clock Ownership
 
-Điều này tránh silently tạo frequency gần đúng ngoài contract hiện tại.
+Application never handles PCLK1 or the APB timer multiplier.
 
-## 9. Extension boundary
+BSP/MCAL derive actual TIM2 clock from RCC state.
 
-- đổi waveform policy → Application,
-- đổi unit/API → Service,
-- đổi pin/timer channel → BSP,
-- hỗ trợ timer/channel mới → MCAL/Platform,
-- đổi clock tree → RCC.
+## 6. Preload Semantics
 
-## 10. Không nên làm
+ARR/CCR preload ensures register updates become active at update events.
 
-Không ghi `TIM2->CCR1` trong Application. Làm vậy buộc behavior phụ thuộc resolution/register và phá layer boundary.
+This avoids partial-cycle glitches.
+
+## 7. ISR Policy
+
+TIM2 does not need an ISR for hardware PWM.
+
+Adding a timer ISR just to generate PWM would increase jitter and CPU load.
+
+## 8. Failure Handling
+
+Initialization validates clock divisibility and timer range.
+
+Fatal initialization failure propagates to `system_panic()`.
+
+## 9. Extension Boundary
+
+Good boundaries:
+
+- brightness pattern -> Application;
+- logical duty -> Service;
+- channel/pin -> BSP;
+- timer registers -> MCAL.
+
+## 10. What Not to Do
+
+Avoid:
+
+- writing CCR1 from Application;
+- hard-coding 72 MHz in Application;
+- software-toggling GPIO for PWM;
+- performing the breathing state machine in a high-rate ISR.
