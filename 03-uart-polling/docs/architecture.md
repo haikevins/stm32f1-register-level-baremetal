@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -93,41 +99,22 @@ The key consequence is that Application can be read without RM0008 open beside i
 ```mermaid
 stateDiagram-v2
     [*] --> GREETING
-    GREETING --> GREETING: TXE not ready
-    GREETING --> GREETING: write next greeting byte
-    GREETING --> ECHO_WAIT: final greeting byte accepted
-    ECHO_WAIT --> ECHO_PENDING: RXNE byte received
-    ECHO_PENDING --> ECHO_PENDING: TXE not ready
-    ECHO_PENDING --> ECHO_WAIT: pending byte transmitted
+    GREETING --> ECHO_WAIT: greeting complete
+    ECHO_WAIT --> ECHO_PENDING: RX byte
+    ECHO_PENDING --> ECHO_WAIT: TX byte
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+When TXE is not ready, `application_process()` returns without changing state. During `GREETING`, one byte is attempted per loop iteration; during `ECHO_PENDING`, the single pending byte is retried until accepted.
+
+The serial path has no ISR-owned software buffer. Application owns the greeting index and one pending echo byte; MCAL exposes instantaneous USART status/data through non-blocking polling calls.
 
 ## Concurrency model
 
-USART work is entirely thread-mode polling. There is no USART1 IRQ, no RX/TX ring, and therefore no ISR/thread data race inside the serial path. SysTick is not part of this example. Hardware, however, continues receiving asynchronously; if thread mode does not read RXNE before another byte arrives, USART ORE can be raised and the driver reports/discards the errored receive.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+USART work is entirely thread-mode polling. There is no USART1 IRQ, RX/TX ring, DMA path, or SysTick dependency. Hardware can still receive while software is busy; if RXNE is not serviced before the next byte arrives, ORE is reported and the errored receive is discarded by the driver.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+USART/GPIO initialization failure prevents entry into the normal loop. Runtime parity/framing/noise/overrun flags are latched by MCAL, consumed by `serial_service_take_error_flags()`, and accumulated into the application diagnostic variables. An errored received byte is not echoed. TXE-not-ready and RXNE-not-ready are normal non-blocking states, not failures.
 
 ## Invariants
 
@@ -137,7 +124,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 4. Application never consumes a second byte while its one-byte echo state is pending.
 5. No code depends on a USART interrupt being enabled.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

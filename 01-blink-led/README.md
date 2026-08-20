@@ -59,16 +59,12 @@ Compile-time checks reject several invalid combinations before register programm
 ## Runtime flow
 
 ```mermaid
-sequenceDiagram
-    participant ST as SysTick_Handler
-    participant TS as time_service
-    participant APP as application_process
-    participant LED as indication_service
-    ST->>ST: increment g_systick_ticks
-    APP->>TS: periodic_due(last, 500 ms)
-    TS-->>APP: true when elapsed >= 500 ms
-    APP->>LED: toggle logical status
-    LED->>LED: map logical state to active-low PC13
+flowchart TB
+    TICK["SysTick IRQ<br/>increment millisecond tick"] --> TIME["time_service timebase"]
+    APP["application_process()"] --> DUE["500 ms period due?"]
+    TIME -. supplies elapsed time .-> DUE
+    DUE -->|"yes"| TOGGLE["Toggle indication state"]
+    TOGGLE --> LED["BSP drives active-low PC13"]
 ```
 
 The common boot path is still:
@@ -101,7 +97,7 @@ The BSP declares PC13 as the status indication and marks it active-low. MCAL ena
 
 ### Event service is not in the active path
 
-The system initializes a static event queue with capacity 16, but this example never pushes or pops an event. It is a scaffold for later event-driven work, not part of the LED timing mechanism. The documentation calls this out explicitly so the presence of the module is not mistaken for runtime use.
+The system initializes a static event queue with capacity 16, but this example never pushes or pops an event. It is reserved for later event-driven examples and remains outside the active LED timing path.
 
 ### Register ownership boundary
 

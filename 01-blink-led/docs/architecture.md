@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -92,45 +98,23 @@ The key consequence is that Application can be read without RM0008 open beside i
 ## Data and control flow
 
 ```mermaid
-sequenceDiagram
-    participant ST as SysTick_Handler
-    participant TS as time_service
-    participant APP as application_process
-    participant LED as indication_service
-    ST->>ST: increment g_systick_ticks
-    APP->>TS: periodic_due(last, 500 ms)
-    TS-->>APP: true when elapsed >= 500 ms
-    APP->>LED: toggle logical status
-    LED->>LED: map logical state to active-low PC13
+flowchart TB
+    TICK["SysTick IRQ<br/>increment millisecond tick"] --> TIME["time_service timebase"]
+    APP["application_process()"] --> DUE["500 ms period due?"]
+    TIME -. supplies elapsed time .-> DUE
+    DUE -->|"yes"| TOGGLE["Toggle indication state"]
+    TOGGLE --> LED["BSP drives active-low PC13"]
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+The SysTick ISR is the sole writer of the millisecond counter. Thread mode reads that timebase and owns the LED scheduling state; GPIO writes occur only through the indication/BSP path.
 
 ## Concurrency model
 
-Only SysTick modifies time asynchronously. Application reads the 32-bit tick counter in thread mode. On Cortex-M3 an aligned 32-bit load/store is a single architectural access; the project relies on that property for the simple monotonic tick. There is no queue between the SysTick ISR and Application and no GPIO work in the ISR.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+Only SysTick modifies time asynchronously. Application reads the aligned 32-bit millisecond counter in thread mode and owns `g_last_blink_ms`. No queue or GPIO operation is performed in the ISR, and the active LED path requires no explicit critical section.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+Initialization failures propagate as `false` through BSP/service setup to `system_init()`, after which `main()` enters `system_panic()`. After successful initialization, the active application has no recoverable runtime-error state: it only consumes SysTick time and toggles the LED. Core faults converge on the same deterministic panic path.
 
 ## Invariants
 
@@ -140,7 +124,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 4. A failed clock/timebase/board initialization prevents global IRQ enable and enters panic.
 5. The event queue may be removed without changing current blink behavior because no active path depends on it.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -97,45 +103,27 @@ The key consequence is that Application can be read without RM0008 open beside i
 ## Data and control flow
 
 ```mermaid
-flowchart LR
-    TIM["TIM3 update @ 1 kHz"] --> TRGO["TRGO"]
-    TRGO --> ADC["ADC1 channel 0"]
-    ADC --> DMA["DMA1 CH1 circular 64 samples"]
-    DMA --> HT["HT: copy samples 0..31"]
-    DMA --> TC["TC: copy samples 32..63"]
-    HT --> PUB["stable 32-sample published block"]
+flowchart TB
+    TIM["TIM3 @ 1 kHz"] --> TRGO["TRGO"]
+    TRGO --> ADC["ADC1 CH0"]
+    ADC --> DMA["DMA1 CH1<br/>64-sample circular buffer"]
+    DMA --> HT["Half transfer<br/>copy 0..31"]
+    DMA --> TC["Transfer complete<br/>copy 32..63"]
+    HT --> PUB["Publish 32-sample block"]
     TC --> PUB
-    PUB --> SVC["ADC service: min/max/avg/mV"]
-    SVC --> APP["Application: 1800/1500 mV LED hysteresis"]
+    PUB --> SVC["ADC service<br/>min / max / avg / mV"]
+    SVC --> APP["LED hysteresis<br/>1800 / 1500 mV"]
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+DMA owns writes to the circular acquisition buffer. The DMA ISR copies only a completed half into the BSP-owned stable block, and thread mode atomically copies that published block before analysis.
 
 ## Concurrency model
 
-This example has three execution agents: TIM3 generates trigger events in hardware, DMA writes memory autonomously, and the CPU alternates between DMA ISR and thread mode. Correctness depends on ownership of *which half is stable*. Copying a completed half in ISR prevents DMA from later rewriting the source while the service analyzes it. The design pays ISR-copy cost to avoid a more complex zero-copy buffer-state protocol.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+TIM3 generates ADC trigger events in hardware, DMA writes the circular buffer autonomously, and DMA1 Channel 1 interrupts publish completed halves. `board_adc_dma_take_sample_block()` saves PRIMASK while copying the stable 32-sample block and clearing `g_block_ready`, preventing ISR publication from racing that transfer. If a new half completes before the previous published block is consumed, the newer block replaces it and the overrun counter increments.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+ADC/DMA/timer-trigger/GPIO initialization failures propagate to `system_panic()`. At runtime, DMA transfer errors increment `g_error_count`; publishing over an unconsumed block increments `g_overrun_count` and replaces the single pending block with the newest completed half. The application exposes both counters for debugger inspection while continuing to process subsequent measurements.
 
 ## Invariants
 
@@ -146,7 +134,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 5. ADC clock must remain within configured/hardware limit and trigger rate must be exactly derived from the active timer clock.
 6. Application consumes processed measurements, never ADC/DMA registers or raw DMA pointers.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

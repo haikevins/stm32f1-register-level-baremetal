@@ -64,11 +64,11 @@ Compile-time checks reject several invalid combinations before register programm
 ```mermaid
 stateDiagram-v2
     [*] --> RAMP_UP
-    RAMP_UP --> RAMP_UP: add 10 permille every 10 ms
-    RAMP_UP --> RAMP_DOWN: clamp at 1000 permille
-    RAMP_DOWN --> RAMP_DOWN: subtract 10 permille every 10 ms
-    RAMP_DOWN --> RAMP_UP: clamp at 0 permille
+    RAMP_UP --> RAMP_DOWN: reach 1000
+    RAMP_DOWN --> RAMP_UP: reach 0
 ```
+
+Every 10 ms, `RAMP_UP` adds 10 permille and `RAMP_DOWN` subtracts 10 permille. The direction changes only at the 0 and 1000 permille limits.
 
 The common boot path is still:
 

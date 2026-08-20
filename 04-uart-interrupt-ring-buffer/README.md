@@ -63,21 +63,28 @@ Compile-time checks reject several invalid combinations before register programm
 
 ## Runtime flow
 
+**Receive path**
+
 ```mermaid
-sequenceDiagram
-    participant HW as USART1 hardware
-    participant ISR as USART1_IRQHandler
-    participant RX as RX ring
-    participant APP as thread mode
-    participant TX as TX ring
-    HW->>ISR: RXNE / error / TXE interrupt
-    ISR->>RX: push received byte if space
-    APP->>RX: pop byte
-    APP->>TX: enqueue echo/greeting byte
-    APP->>ISR: enable TXEIE as part of enqueue critical section
-    ISR->>TX: pop next transmit byte
-    ISR->>HW: write DR
-    ISR->>ISR: disable TXEIE when TX ring becomes empty
+flowchart TB
+    HW["USART1 RXNE / error"] --> IRQ["USART1_IRQHandler"]
+    IRQ --> READ["Read SR then DR"]
+    READ -->|"valid byte"| RX["Push into RX ring"]
+    READ -->|"hardware error"| ERR["Accumulate error flags"]
+    RX --> APP["Thread mode pops RX ring"]
+```
+
+**Transmit path**
+
+```mermaid
+flowchart TB
+    APP["Enqueue TX byte"]
+    CS["Critical section<br/>head + TXEIE"]
+    APP --> CS
+    CS --> IRQ["TXE interrupt"]
+    IRQ --> POP["Pop TX ring"]
+    POP --> DR["Write USART DR"]
+    IRQ -->|"empty"| OFF["Disable TXEIE"]
 ```
 
 The common boot path is still:

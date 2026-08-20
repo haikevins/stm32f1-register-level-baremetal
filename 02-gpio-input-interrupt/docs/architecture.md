@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -93,50 +99,35 @@ The key consequence is that Application can be read without RM0008 open beside i
 
 ## Data and control flow
 
+**Interrupt capture**
+
 ```mermaid
-sequenceDiagram
-    participant BTN as Physical button
-    participant EXTI as EXTI0_IRQHandler
-    participant MCAL as mcal_exti
-    participant SVC as button_service
-    participant APP as Application
-    BTN->>EXTI: falling edge on PA0
-    EXTI->>MCAL: read/clear PR, OR line bit into event mask
-    APP->>SVC: take_press()
-    SVC->>MCAL: atomically take EXTI event
-    SVC->>SVC: start/restart 30 ms debounce window
-    APP->>SVC: take_press() on later loop iterations
-    SVC->>SVC: after 30 ms sample PA0
-    SVC-->>APP: true only if pin is still active
+flowchart TB
+    EDGE["PA0 falling edge"] --> IRQ["EXTI0_IRQHandler"]
+    IRQ --> CLEAR["Clear EXTI pending bit"]
+    CLEAR --> LATCH["Latch line bit in event mask"]
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+**Thread-mode qualification**
+
+```mermaid
+flowchart TB
+    APP["application_process()"] --> TAKE["button_service_take_press()"]
+    TAKE --> EVENT["Atomically take EXTI event"]
+    EVENT --> WAIT["Start / restart 30 ms window"]
+    WAIT --> SAMPLE["Later: sample PA0"]
+    SAMPLE -->|"still active"| PRESS["Return press = true"]
+```
+
+EXTI interrupt context is the sole producer of the latched event bit. Thread mode atomically consumes that bit and owns the debounce deadline and GPIO re-sampling policy.
 
 ## Concurrency model
 
-There are two asynchronous producers of information: SysTick advances the timebase and EXTI0 records an edge. The debounce state itself belongs to thread mode. The only explicit IRQ critical section is the test-and-clear of the EXTI software event bit. The design therefore keeps ISR execution short and keeps the GPIO re-sampling/time policy out of interrupt context.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+SysTick advances the timebase and EXTI0 records the falling edge. Debounce state remains entirely in thread mode. `mcal_exti_take_event()` saves PRIMASK, disables interrupts for the test-and-clear operation, and restores the prior interrupt state, preventing a lost event during consumption.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+GPIO/EXTI/timebase initialization failures propagate to `system_init()` and then `system_panic()`. At runtime, a latched EXTI bit can coalesce repeated edges before thread-mode consumption; this is part of the event-bit contract rather than an error condition. A debounce check that finds PA0 released simply returns no press. Core faults remain fail-stop.
 
 ## Invariants
 
@@ -146,7 +137,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 4. Debounce acceptance requires both elapsed time and a still-active physical level.
 5. Application sees only a semantic press and never reads EXTI/GPIO registers.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

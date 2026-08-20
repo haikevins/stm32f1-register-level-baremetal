@@ -66,13 +66,12 @@ Compile-time checks reject several invalid combinations before register programm
 ```mermaid
 stateDiagram-v2
     [*] --> GREETING
-    GREETING --> GREETING: TXE not ready
-    GREETING --> GREETING: write next greeting byte
-    GREETING --> ECHO_WAIT: final greeting byte accepted
-    ECHO_WAIT --> ECHO_PENDING: RXNE byte received
-    ECHO_PENDING --> ECHO_PENDING: TXE not ready
-    ECHO_PENDING --> ECHO_WAIT: pending byte transmitted
+    GREETING --> ECHO_WAIT: greeting complete
+    ECHO_WAIT --> ECHO_PENDING: RX byte
+    ECHO_PENDING --> ECHO_WAIT: TX byte
 ```
+
+When TXE is not ready, `application_process()` returns without changing state. During `GREETING`, one byte is attempted per loop iteration; during `ECHO_PENDING`, the single pending byte is retried until accepted.
 
 The common boot path is still:
 

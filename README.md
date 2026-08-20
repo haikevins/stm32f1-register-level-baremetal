@@ -18,7 +18,7 @@
 ## Learning sequence
 
 ```mermaid
-flowchart LR
+flowchart TB
     E1["01 GPIO + SysTick"] --> E2["02 EXTI + debounce"]
     E2 --> E3["03 USART polling"]
     E3 --> E4["04 USART IRQ + rings"]

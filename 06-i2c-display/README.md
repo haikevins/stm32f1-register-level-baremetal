@@ -68,19 +68,15 @@ Compile-time checks reject several invalid combinations before register programm
 ## Runtime flow
 
 ```mermaid
-sequenceDiagram
-    participant APP as Application
-    participant SSD as SSD1306 ECUAL
-    participant BSP as board display transport
-    participant I2C as I2C1 MCAL
-    APP->>SSD: draw text/progress into framebuffer
-    APP->>SSD: update()
-    SSD->>BSP: command bytes for addressing
-    BSP->>I2C: write with control prefix 0x00
-    SSD->>BSP: 1024 framebuffer bytes
-    BSP->>I2C: write with control prefix 0x40
-    I2C-->>SSD: success or bounded failure
+flowchart TB
+    APP["Application draws UI state"] --> FB["SSD1306<br/>1024-byte framebuffer"]
+    FB --> UPDATE["ssd1306_update()"]
+    UPDATE --> BSP["Board display transport"]
+    BSP --> CMD["I2C1 command write<br/>control 0x00"]
+    BSP --> DATA["I2C1 data write<br/>control 0x40"]
 ```
+
+The command phase programs SSD1306 addressing; the data phase transfers the framebuffer. Each I2C write completes synchronously with either success or a bounded failure result.
 
 The common boot path is still:
 

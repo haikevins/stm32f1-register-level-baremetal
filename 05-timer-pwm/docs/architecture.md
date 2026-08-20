@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -95,39 +101,21 @@ The key consequence is that Application can be read without RM0008 open beside i
 ```mermaid
 stateDiagram-v2
     [*] --> RAMP_UP
-    RAMP_UP --> RAMP_UP: add 10 permille every 10 ms
-    RAMP_UP --> RAMP_DOWN: clamp at 1000 permille
-    RAMP_DOWN --> RAMP_DOWN: subtract 10 permille every 10 ms
-    RAMP_DOWN --> RAMP_UP: clamp at 0 permille
+    RAMP_UP --> RAMP_DOWN: reach 1000
+    RAMP_DOWN --> RAMP_UP: reach 0
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+Every 10 ms, `RAMP_UP` adds 10 permille and `RAMP_DOWN` subtracts 10 permille. The direction changes only at the 0 and 1000 permille limits.
+
+Application owns the ramp direction and logical duty value. MCAL/BSP own timer configuration; once enabled, TIM2 generates PWM autonomously between super-loop iterations.
 
 ## Concurrency model
 
-SysTick asynchronously advances the timebase, but the PWM timer itself does not share software state with an ISR. CCR1 is written from thread mode while preload is enabled, so the new compare value is transferred on an update event rather than arbitrarily changing the active comparison mid-period.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+SysTick asynchronously advances the software timebase. PWM generation itself is hardware autonomous: thread mode updates CCR1 while preload is enabled, and TIM2 transfers the new compare value on an update event. No PWM ISR or software critical section is used in the active path.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+Clock/GPIO/timer/timebase initialization failures propagate to `system_panic()`. After initialization, the duty ramp has no separate runtime error state; its bounds are enforced by the application and service configuration. Invalid timer-divider combinations are rejected during initialization rather than tolerated during steady-state execution.
 
 ## Invariants
 
@@ -137,7 +125,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 4. Hardware PWM continues between super-loop iterations without CPU edge servicing.
 5. Requested timer tick and PWM frequency must satisfy the driver's exact-integer constraints.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

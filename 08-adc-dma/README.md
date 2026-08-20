@@ -65,16 +65,16 @@ Compile-time checks reject several invalid combinations before register programm
 ## Runtime flow
 
 ```mermaid
-flowchart LR
-    TIM["TIM3 update @ 1 kHz"] --> TRGO["TRGO"]
-    TRGO --> ADC["ADC1 channel 0"]
-    ADC --> DMA["DMA1 CH1 circular 64 samples"]
-    DMA --> HT["HT: copy samples 0..31"]
-    DMA --> TC["TC: copy samples 32..63"]
-    HT --> PUB["stable 32-sample published block"]
+flowchart TB
+    TIM["TIM3 @ 1 kHz"] --> TRGO["TRGO"]
+    TRGO --> ADC["ADC1 CH0"]
+    ADC --> DMA["DMA1 CH1<br/>64-sample circular buffer"]
+    DMA --> HT["Half transfer<br/>copy 0..31"]
+    DMA --> TC["Transfer complete<br/>copy 32..63"]
+    HT --> PUB["Publish 32-sample block"]
     TC --> PUB
-    PUB --> SVC["ADC service: min/max/avg/mV"]
-    SVC --> APP["Application: 1800/1500 mV LED hysteresis"]
+    PUB --> SVC["ADC service<br/>min / max / avg / mV"]
+    SVC --> APP["LED hysteresis<br/>1800 / 1500 mV"]
 ```
 
 The common boot path is still:

@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -96,44 +102,28 @@ The key consequence is that Application can be read without RM0008 open beside i
 ## Data and control flow
 
 ```mermaid
-flowchart TD
-    INIT["memory_service_init(): read JEDEC ID"] --> ID{"manufacturer 0xEF and capacity 0x17?"}
-    ID -->|no| FAILINIT["system_init() fails -> panic"]
-    ID -->|yes| ERASE["Erase sector 0x007FF000"]
-    ERASE --> PROGRAM["Program 32-byte pattern"]
-    PROGRAM --> READ["Read 32 bytes back"]
-    READ --> VERIFY{"byte-for-byte equal?"}
-    VERIFY -->|yes| HEART["PC13 heartbeat every 500 ms"]
-    VERIFY -->|no| SOLID["PC13 held ON; error counter updated"]
+flowchart TB
+    INIT["Read JEDEC ID"] --> ID{"Expected device?"}
+    ID -->|"no"| FAILINIT["Initialization fails"]
+    ID -->|"yes"| ERASE["Erase test sector"]
+    ERASE --> PROGRAM["Program 32 bytes"]
+    PROGRAM --> READ["Read back"]
+    READ --> VERIFY{"Data equal?"}
+    VERIFY -->|"yes"| HEART["500 ms heartbeat"]
+    VERIFY -->|"no"| SOLID["LED solid ON"]
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+The expected JEDEC identity is manufacturer `0xEF` with capacity ID `0x17`, and the destructive test sector is `0x007FF000`. Runtime test failures increment `application_memory_error_count`.
+
+Application owns the test pattern and readback buffers. SPI transactions are synchronous and single-client; chip-select ownership is contained inside the board transport for the duration of each W25Q64 command.
 
 ## Concurrency model
 
-SPI and W25Q64 operations are synchronous thread-mode transactions; there is no SPI interrupt, DMA, or bus arbiter. SysTick is used only after initialization for the heartbeat. CS ownership is wholly inside the board transport during a transaction. Because the bus is single-client in this example, the design does not yet need a mutual-exclusion policy across multiple SPI devices.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+SPI and W25Q64 operations are synchronous thread-mode transactions; there is no SPI interrupt, DMA, or bus arbiter. SysTick is used only for the post-test heartbeat. The bus has one client, so no runtime mutex or critical section is required for chip-select ownership.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+A JEDEC-ID initialization failure prevents normal startup and leads to `system_panic()`. The destructive erase/program/read/verify self-test is handled differently: a failed operation increments `application_memory_error_count`, leaves `application_memory_test_passed` false, and thread mode drives PC13 solid ON. A successful test switches to the 500 ms heartbeat.
 
 ## Invariants
 
@@ -144,7 +134,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 5. External-device commands live in ECUAL; SPI CR1/SR/DR logic remains in MCAL.
 6. A device-init failure and an operational self-test failure intentionally have different system outcomes.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

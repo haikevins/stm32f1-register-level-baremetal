@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -91,50 +97,39 @@ The key consequence is that Application can be read without RM0008 open beside i
 
 ## Data and control flow
 
+**Receive path**
+
 ```mermaid
-sequenceDiagram
-    participant HW as USART1 hardware
-    participant ISR as USART1_IRQHandler
-    participant RX as RX ring
-    participant APP as thread mode
-    participant TX as TX ring
-    HW->>ISR: RXNE / error / TXE interrupt
-    ISR->>RX: push received byte if space
-    APP->>RX: pop byte
-    APP->>TX: enqueue echo/greeting byte
-    APP->>ISR: enable TXEIE as part of enqueue critical section
-    ISR->>TX: pop next transmit byte
-    ISR->>HW: write DR
-    ISR->>ISR: disable TXEIE when TX ring becomes empty
+flowchart TB
+    HW["USART1 RXNE / error"] --> IRQ["USART1_IRQHandler"]
+    IRQ --> READ["Read SR then DR"]
+    READ -->|"valid byte"| RX["Push into RX ring"]
+    READ -->|"hardware error"| ERR["Accumulate error flags"]
+    RX --> APP["Thread mode pops RX ring"]
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+**Transmit path**
+
+```mermaid
+flowchart TB
+    APP["Enqueue TX byte"]
+    CS["Critical section<br/>head + TXEIE"]
+    APP --> CS
+    CS --> IRQ["TXE interrupt"]
+    IRQ --> POP["Pop TX ring"]
+    POP --> DR["Write USART DR"]
+    IRQ -->|"empty"| OFF["Disable TXEIE"]
+```
+
+RX and TX rings use split ownership: ISR advances RX head and TX tail, while thread mode advances RX tail and TX head. Only coordination state that breaks pure SPSC ownership is protected by a short PRIMASK critical section.
 
 ## Concurrency model
 
-This example is the repository's clearest SPSC demonstration. RX and TX deliberately split index ownership instead of placing a mutex around every ring operation. The implementation assumes the Cortex-M3 interrupt/thread execution model, aligned atomic index accesses, and volatile accesses to shared state. The short explicit critical sections are reserved for state that violates pure SPSC ownership: TXEIE enable coordination and take-and-clear counters.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+USART1 interrupt context and thread mode share two SPSC rings. ISR alone advances RX head and TX tail; thread mode alone advances RX tail and TX head. Enqueue plus TXEIE enable is protected by a PRIMASK critical section so the empty-queue ISR path cannot disable TXEIE after a producer has just queued data. Take-and-clear error/overflow counters use the same save/restore pattern.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+USART/GPIO initialization failure enters `system_panic()`. At runtime, hardware USART errors are accumulated in error flags; an RX ring-full condition drops the newest byte and increments `rx_overflow_count`. A full TX ring makes `try_write_byte()` return `false` without corrupting queued data. Core faults remain fail-stop.
 
 ## Invariants
 
@@ -145,7 +140,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 5. RX overflow does not overwrite unread older data.
 6. Error flags and overflow counters are observable without exposing USART registers above MCAL.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

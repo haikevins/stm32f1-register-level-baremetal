@@ -67,16 +67,18 @@ Compile-time checks reject several invalid combinations before register programm
 ## Runtime flow
 
 ```mermaid
-flowchart TD
-    INIT["memory_service_init(): read JEDEC ID"] --> ID{"manufacturer 0xEF and capacity 0x17?"}
-    ID -->|no| FAILINIT["system_init() fails -> panic"]
-    ID -->|yes| ERASE["Erase sector 0x007FF000"]
-    ERASE --> PROGRAM["Program 32-byte pattern"]
-    PROGRAM --> READ["Read 32 bytes back"]
-    READ --> VERIFY{"byte-for-byte equal?"}
-    VERIFY -->|yes| HEART["PC13 heartbeat every 500 ms"]
-    VERIFY -->|no| SOLID["PC13 held ON; error counter updated"]
+flowchart TB
+    INIT["Read JEDEC ID"] --> ID{"Expected device?"}
+    ID -->|"no"| FAILINIT["Initialization fails"]
+    ID -->|"yes"| ERASE["Erase test sector"]
+    ERASE --> PROGRAM["Program 32 bytes"]
+    PROGRAM --> READ["Read back"]
+    READ --> VERIFY{"Data equal?"}
+    VERIFY -->|"yes"| HEART["500 ms heartbeat"]
+    VERIFY -->|"no"| SOLID["LED solid ON"]
 ```
+
+The expected JEDEC identity is manufacturer `0xEF` with capacity ID `0x17`, and the destructive test sector is `0x007FF000`. Runtime test failures increment `application_memory_error_count`.
 
 The common boot path is still:
 

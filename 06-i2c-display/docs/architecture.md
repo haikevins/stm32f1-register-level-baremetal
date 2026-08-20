@@ -21,19 +21,25 @@
 
 The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
 
-```mermaid
-flowchart TD
-    APP["app: demo/product policy"] --> SVC["services: logical capability"]
-    SVC --> BSP["bsp/bluepill: physical resource binding"]
-    SVC --> ECUAL["ecual: external component protocol when used"]
-    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
-    ECUAL --> MCAL
-    MCAL --> DEV["platform/device: memory map + register fields"]
-    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
-    SYS["system: composition root"] -. constructs .-> BSP
-    SYS -. constructs .-> SVC
-    SYS -. constructs .-> APP
+```text
+app
+ |
+ v
+services
+ |\
+ | +------> ecual (only when an external-device protocol is used)
+ v
+bsp/bluepill
+ |
+ v
+mcal
+ |\
+ | +------> platform/arch
+ v
+platform/device
 ```
+
+`system` is the composition root. It initializes the concrete board resources and services before handing control to the application.
 
 `check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
@@ -96,47 +102,25 @@ The key consequence is that Application can be read without RM0008 open beside i
 ## Data and control flow
 
 ```mermaid
-sequenceDiagram
-    participant APP as Application
-    participant SSD as SSD1306 ECUAL
-    participant BSP as board display transport
-    participant I2C as I2C1 MCAL
-    APP->>SSD: draw text/progress into framebuffer
-    APP->>SSD: update()
-    SSD->>BSP: command bytes for addressing
-    BSP->>I2C: write with control prefix 0x00
-    SSD->>BSP: 1024 framebuffer bytes
-    BSP->>I2C: write with control prefix 0x40
-    I2C-->>SSD: success or bounded failure
+flowchart TB
+    APP["Application draws UI state"] --> FB["SSD1306<br/>1024-byte framebuffer"]
+    FB --> UPDATE["ssd1306_update()"]
+    UPDATE --> BSP["Board display transport"]
+    BSP --> CMD["I2C1 command write<br/>control 0x00"]
+    BSP --> DATA["I2C1 data write<br/>control 0x40"]
 ```
 
-The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+The command phase programs SSD1306 addressing; the data phase transfers the framebuffer. Each I2C write completes synchronously with either success or a bounded failure result.
+
+The SSD1306 ECUAL owns the 1024-byte framebuffer. Application mutates it only through display-service calls, and the synchronous update path reads it entirely from thread mode.
 
 ## Concurrency model
 
-SysTick advances the application schedule. I2C transfers themselves execute synchronously in thread mode with bounded polling. During early initialization global IRQs are still disabled, so the 100 ms display power-on delay uses a CPU busy-loop rather than SysTick. The 1024-byte framebuffer is owned by the SSD1306 ECUAL and is not accessed from an ISR.
-
-The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
-
-Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+SysTick advances the application schedule after initialization. I2C transfers are synchronous bounded-polling transactions in thread mode, and the SSD1306 framebuffer is never touched from an ISR. Because global interrupts are still disabled during early startup, the display power-on delay uses a CPU busy-loop rather than the SysTick timebase.
 
 ## Failure model
 
-The dominant initialization failure contract is boolean/status propagation upward:
-
-```text
-MCAL/BSP/ECUAL initialization failure
-              |
-              v
-       system_init() == false
-              |
-              v
-        system_panic()
-```
-
-Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
-
-Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
+Display-bus or SSD1306 initialization failure prevents normal startup and leads to `system_panic()`. After startup, a failed `display_service_present()` increments `application_display_error_count`, clears the operational flag, and stops further display updates without panicking. MCAL I2C waits are bounded so a stuck bus cannot trap the CPU in an unbounded polling loop.
 
 ## Invariants
 
@@ -147,7 +131,7 @@ Timeouts are bounded loops rather than scheduler-based deadlines in lower-level 
 5. The framebuffer remains stable in ECUAL memory while a synchronous transfer reads it.
 6. Application reacts to a boolean presentation result rather than decoding I2C status flags.
 
-These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
+These invariants define the current ownership and concurrency contract. Violating one changes the runtime model and requires corresponding implementation and verification changes.
 
 ## Why this structure matters
 

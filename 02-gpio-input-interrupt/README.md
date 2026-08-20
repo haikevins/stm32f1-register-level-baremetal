@@ -62,21 +62,24 @@ Compile-time checks reject several invalid combinations before register programm
 
 ## Runtime flow
 
+**Interrupt capture**
+
 ```mermaid
-sequenceDiagram
-    participant BTN as Physical button
-    participant EXTI as EXTI0_IRQHandler
-    participant MCAL as mcal_exti
-    participant SVC as button_service
-    participant APP as Application
-    BTN->>EXTI: falling edge on PA0
-    EXTI->>MCAL: read/clear PR, OR line bit into event mask
-    APP->>SVC: take_press()
-    SVC->>MCAL: atomically take EXTI event
-    SVC->>SVC: start/restart 30 ms debounce window
-    APP->>SVC: take_press() on later loop iterations
-    SVC->>SVC: after 30 ms sample PA0
-    SVC-->>APP: true only if pin is still active
+flowchart TB
+    EDGE["PA0 falling edge"] --> IRQ["EXTI0_IRQHandler"]
+    IRQ --> CLEAR["Clear EXTI pending bit"]
+    CLEAR --> LATCH["Latch line bit in event mask"]
+```
+
+**Thread-mode qualification**
+
+```mermaid
+flowchart TB
+    APP["application_process()"] --> TAKE["button_service_take_press()"]
+    TAKE --> EVENT["Atomically take EXTI event"]
+    EVENT --> WAIT["Start / restart 30 ms window"]
+    WAIT --> SAMPLE["Later: sample PA0"]
+    SAMPLE -->|"still active"| PRESS["Return press = true"]
 ```
 
 The common boot path is still:
