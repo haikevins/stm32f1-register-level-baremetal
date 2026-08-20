@@ -17,13 +17,12 @@
 
 ## Porting levels
 
-```mermaid
-flowchart TD
-    BOARD["Same STM32F103C8T6, different board"] --> BSP["Mostly BSP/config/wiring"]
-    DEVICE["Different STM32F1 device"] --> DEV["Device map + linker/IRQ/pin review"]
-    FAMILY["Different STM32 family"] --> MCAL["New register model and MCAL sequences"]
-    ARCH["Different CPU architecture"] --> CORE["Startup + exception + core-platform redesign"]
-```
+| Porting scope | Primary change surface |
+|---|---|
+| Same STM32F103C8T6, different board | BSP, configuration, wiring |
+| Different STM32F1 device | Device map, linker geometry, IRQ/pin review |
+| Different STM32 family | Register model, MCAL sequences, clock/peripheral assumptions |
+| Different CPU architecture | Startup, exception model, core-platform support |
 
 The larger the move, the less appropriate it is to preserve code merely because names look similar.
 

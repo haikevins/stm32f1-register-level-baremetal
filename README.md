@@ -52,19 +52,25 @@ The template therefore teaches an important rule: **copy architecture, not unuse
 
 ## Runtime and composition
 
+**Reset and C runtime**
+
 ```mermaid
-flowchart TD
+flowchart TB
     RESET["Reset"] --> START["Reset_Handler"]
-    START --> CRT["runtime_init(): .data copy + .bss clear"]
+    START --> CRT["Initialize .data / .bss"]
     CRT --> MAIN["main()"]
-    MAIN --> OFF["disable global IRQ"]
+```
+
+**System construction and steady state**
+
+```mermaid
+flowchart TB
+    MAIN["main()"] --> OFF["Disable IRQs"]
     OFF --> INIT["system_init()"]
     INIT --> BOARD["board_init()"]
     BOARD --> APPINIT["application_init()"]
-    APPINIT --> ON["enable global IRQ"]
-    ON --> LOOP["application_process()"]
-    LOOP --> IDLE["system_idle(): WFI in template"]
-    IDLE --> LOOP
+    APPINIT --> ON["Enable IRQs"]
+    ON --> LOOP["Repeat application_process()<br/>then system_idle() / WFI"]
 ```
 
 The template differs intentionally from the completed examples in one visible way: `system_idle()` uses `cortex_m3_wait_for_interrupt()` rather than NOP. This demonstrates the normal low-power idle shape, but a concrete project must ensure it has a wake source and that its debugger/reset strategy works with WFI before retaining it.
@@ -76,16 +82,16 @@ The template differs intentionally from the completed examples in one visible wa
 The template's `check_layers.py` enforces the same dependency rules as the examples:
 
 ```mermaid
-flowchart TD
+flowchart TB
     APP["app"] --> SVC["services"]
     SVC --> BSP["bsp"]
     SVC --> ECUAL["ecual"]
     BSP --> MCAL["mcal"]
     ECUAL --> MCAL
     MCAL --> PLATFORM["platform"]
-    COMMON["common/config"]
-    SYS["system composition root"] -. may compose all .-> APP
 ```
+
+`system` composes these layers at startup. `common` and `config` provide shared types, utilities, and compile-time policy rather than forming another runtime layer.
 
 The practical rule for register-level work is simple:
 

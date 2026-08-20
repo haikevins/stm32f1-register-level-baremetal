@@ -43,10 +43,12 @@ The intent is not to imitate a large framework. It is to keep each register sequ
 The linker and startup code form one inseparable contract:
 
 ```mermaid
-flowchart TD
-    LINK["linker emits _sidata/_sdata/_edata/_sbss/_ebss/_estack"] --> RESET["vector table uses _estack and Reset_Handler"]
-    RESET --> DATA["runtime_init copies .data"]
-    DATA --> BSS["runtime_init clears .bss"]
+flowchart TB
+    LINK["Linker symbols<br/>.data / .bss / stack"]
+    RESET["Vector table<br/>MSP + Reset_Handler"]
+    LINK --> RESET
+    RESET --> DATA["Copy .data"]
+    DATA --> BSS["Clear .bss"]
     BSS --> MAIN["main()"]
 ```
 

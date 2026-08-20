@@ -54,7 +54,7 @@ error flags and timeout cases
 
 If an external device is involved, do the same from its datasheet: electrical requirements, bus mode/address, startup delay, command framing, state/status model, maximum clock, and destructive operations.
 
-This written contract becomes the basis for both code and documentation.
+This written contract becomes the basis for the module API, implementation, and validation criteria.
 
 ## Step 2 - extend the device model
 
@@ -106,7 +106,7 @@ For hardware waits, decide whether the operation:
 - requires DMA;
 - requires a wall-clock timeout rather than iteration limit.
 
-Make that choice explicit in the API and documentation.
+Make that choice explicit in the API contract and validation behavior.
 
 ## Step 4 - bind the board
 
@@ -140,17 +140,16 @@ Not every MCAL requires both layers. The smallest correct architecture is prefer
 Add modules to `system_init()` in dependency order. Then implement Application through Service APIs.
 
 ```mermaid
-flowchart TD
-    DEV["device register model"] --> MCAL["MCAL driver"]
+flowchart TB
+    DEV["Device register model"] --> MCAL["MCAL driver"]
     MCAL --> BSP["BSP binding"]
-    MCAL --> ECUAL["ECUAL transport user when needed"]
+    MCAL --> ECUAL["ECUAL transport"]
     BSP --> SVC["Service capability"]
     ECUAL --> SVC
     SVC --> APP["Application policy"]
-    SYS["system_init()"] -. constructs in order .-> BSP
-    SYS -. constructs in order .-> SVC
-    SYS -. constructs in order .-> APP
 ```
+
+`system_init()` constructs the concrete BSP and service dependencies before `application_init()` runs.
 
 If Application must know a register bit to use the feature, the abstraction boundary is not finished.
 
