@@ -1,286 +1,117 @@
-# Porting Guide — Template
+# Project Template - Porting Guide
 
-## 1. Case A — New Project on the Same Blue Pill
+> **Purpose:** separate board, STM32 device, and Cortex-M3 assumptions before reusing the template on different hardware.
 
-Keep:
+[← Adding a module](adding_a_module.md) · [Template README](../README.md) · [Architecture](architecture.md)
 
-- startup;
-- linker;
-- platform architecture;
-- STM32F103 device layer.
+## Table of contents
 
-Change:
+- [Porting levels](#porting-levels)
+- [Same MCU different board](#same-mcu-different-board)
+- [Different STM32F1 device](#different-stm32f1-device)
+- [Different STM32 family](#different-stm32-family)
+- [Different CPU architecture](#different-cpu-architecture)
+- [Startup and linker review](#startup-and-linker-review)
+- [Validation matrix](#validation-matrix)
+- [References](#references)
 
-- board resources;
-- MCAL modules as required;
-- Services;
-- Application;
-- configuration.
+## Porting levels
 
-## 2. Case B — Different Board, Same STM32F103C8T6
-
-Usually keep:
-
-```text
-app/
-services/
-ecual/
-mcal/
-platform/
-startup/
-linker/
+```mermaid
+flowchart TD
+    BOARD["Same STM32F103C8T6, different board"] --> BSP["Mostly BSP/config/wiring"]
+    DEVICE["Different STM32F1 device"] --> DEV["Device map + linker/IRQ/pin review"]
+    FAMILY["Different STM32 family"] --> MCAL["New register model and MCAL sequences"]
+    ARCH["Different CPU architecture"] --> CORE["Startup + exception + core-platform redesign"]
 ```
+
+The larger the move, the less appropriate it is to preserve code merely because names look similar.
+
+## Same MCU different board
+
+Keep startup/linker/device/MCAL where the hardware truly matches, but change/re-verify:
+
+- HSE source/frequency and whether a fallback is acceptable;
+- LED/button/peripheral pin mapping and polarity;
+- alternate-function remaps;
+- external pull-ups/level shifting/transceivers;
+- external-device address/CS wiring;
+- debug connector/reset wiring;
+- supply/reference assumptions such as VDDA.
+
+This should mostly be a BSP/configuration exercise. If Application changes because the LED moved, the board abstraction has leaked.
+
+## Different STM32F1 device
 
 Review:
 
-```text
-bsp/
-config/
-tools/openocd/
-```
-
-## 3. Case C — STM32F103 with Different Memory Density
-
-Update:
-
-- linker FLASH/RAM sizes;
-- startup vector assumptions if the device variant differs;
-- device constants;
-- OpenOCD target expectations.
-
-Do not assume the C8 memory map is correct for another density.
-
-## 4. Case D — Different STM32F1 Part
-
-Review:
-
-- memory map;
-- peripheral base addresses;
-- register differences;
-- available peripherals;
+- Flash/SRAM size and linker regions;
+- vector table for the exact density/device;
+- peripheral availability and base addresses;
 - IRQ numbers;
-- alternate-function mapping;
-- clock tree;
-- startup vectors;
-- linker memory.
+- DMA channel mappings;
+- GPIO/remap differences;
+- maximum clocks;
+- package pinout;
+- device errata.
 
-MCAL may require partial changes.
+Prefer a new `platform/device/<part>` directory when the register/device contract differs meaningfully.
 
-## 5. Case E — Different MCU Family but Still Cortex-M
+## Different STM32 family
 
-Higher layers can often remain.
+A move from F1 to another STM32 generation is **not** only a base-address edit. GPIO configuration style, RCC tree, Flash wait-state programming, DMA, ADC calibration/trigger selection, interrupt flags, and peripheral register layouts may differ substantially. Keep Application/Service/ECUAL interfaces when useful, but expect new platform/device and MCAL implementations.
 
-Replace or heavily adapt:
+## Different CPU architecture
 
-```text
-Platform Device
-MCAL
-BSP
-startup
-linker
-clock setup
-OpenOCD target
-```
+Moving away from Cortex-M3 requires review of:
 
-Platform Architecture may remain partly reusable if the target is still
-compatible Cortex-M.
+- reset/vector model;
+- exception entry/return;
+- interrupt mask primitive replacing PRIMASK semantics;
+- system-control/NVIC/SysTick equivalents;
+- barriers and low-power instructions;
+- atomic access widths/alignment;
+- linker/startup ABI assumptions.
 
-## 6. Case F — Different Architecture
+At that point `platform/arch/cortex-m3` should be replaced, not renamed while retaining Cortex-M behavior.
 
-Port:
+## Startup and linker review
 
-- architecture intrinsics;
-- interrupt model;
-- startup;
-- linker;
-- critical sections;
-- toolchain flags;
-- device layer.
-
-The conceptual layered design can still be retained.
-
-## 7. BSP Selection Strategy
-
-Keep logical resource names stable.
-
-Example:
+The template's startup assumes linker symbols and a conventional C runtime initialization:
 
 ```text
-STATUS_LED
-USER_BUTTON
-DISPLAY_BUS
-MEMORY_BUS
-ADC_INPUT
+_sidata -> Flash load image for .data
+_sdata.._edata -> SRAM .data destination
+_sbss.._ebss -> zero-initialized region
+_estack -> initial MSP
 ```
 
-Only BSP maps those resources to physical pins/peripherals.
+Any memory-map change must keep startup and linker consistent. Also review the 1 KiB static stack-reserve assertion; it is a project choice, not a property of the MCU.
 
-## 8. Clock Porting
+## Validation matrix
 
-Validate:
+| Validation | Board port | New F1 device | New family | New CPU arch |
+|---|:---:|:---:|:---:|:---:|
+| layer checker | required | required | required | required |
+| linker map/section placement | verify | rewrite/verify | rewrite/verify | rewrite/verify |
+| vector table | verify | verify/rewrite | rewrite | rewrite |
+| clock tree | verify | verify | rewrite | rewrite |
+| GPIO/peripheral MCAL | verify | verify | rewrite | rewrite |
+| Cortex-M3 arch layer | same | usually same | depends | replace |
+| ISR atomicity assumptions | verify | verify | verify | redesign as needed |
+| instrumented peripheral bring-up | required | required | required | required |
 
-- oscillator source;
-- startup timeout;
-- PLL settings;
-- SYSCLK;
-- PCLK1/PCLK2;
-- timer multiplier rule;
-- flash wait states;
-- peripheral frequency limits.
+Porting is complete only when behavior, timing, error paths, and ownership remain valid—not when the source merely compiles.
 
-Never copy 72 MHz assumptions blindly.
+## References
 
-## 9. GPIO Porting
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-For each pin verify:
+---
 
-- port base;
-- clock enable;
-- CRL/CRH field;
-- MODE/CNF combination;
-- pull behavior;
-- active polarity;
-- AF routing.
-
-## 10. Interrupt Porting
-
-Verify:
-
-- vector index;
-- IRQ number;
-- handler name;
-- NVIC priority field width;
-- pending-clear behavior;
-- peripheral flag clear sequence.
-
-## 11. DMA Porting
-
-DMA mapping is highly device-specific.
-
-Verify:
-
-- peripheral-to-channel mapping;
-- channel register layout;
-- transfer width;
-- address increment;
-- circular mode;
-- interrupt flags;
-- clear registers.
-
-## 12. External-Device Driver Portability
-
-Keep ECUAL unchanged when:
-
-- the external device is unchanged;
-- the transport semantics are unchanged.
-
-Replace only the board bus/MCAL below it.
-
-## 13. Linker Porting
-
-Update:
-
-- FLASH origin/length;
-- RAM origin/length;
-- vector placement;
-- stack top;
-- section alignment.
-
-Then inspect the linked map.
-
-## 14. Startup Porting
-
-The startup file must match:
-
-- architecture;
-- vector count/order;
-- reset semantics;
-- section initialization.
-
-Do not reuse an STM32F103 vector table on an unrelated MCU.
-
-## 15. Toolchain Flags
-
-Review:
-
-```text
--mcpu
--mthumb
--float ABI if applicable
-linker script
-assembler target
-```
-
-## 16. OpenOCD
-
-Change the target configuration when the MCU family/device changes.
-
-Use a conservative adapter speed for first bring-up.
-
-## 17. Debug Reset Strategy
-
-Current setup uses:
-
-```tcl
-reset_config none
-```
-
-because NRST may not be wired.
-
-If the new board/probe supports NRST reliably, hardware reset may be enabled
-after validation.
-
-## 18. Validation by Layer
-
-### Startup
-
-- reset reaches `main`;
-- `.data` correct;
-- `.bss` zero;
-- stack valid.
-
-### Clock
-
-- active clock source correct;
-- SYSCLK correct;
-- APB clocks correct.
-
-### GPIO
-
-- physical electrical mode correct;
-- output polarity correct.
-
-### Peripheral
-
-- register configuration correct;
-- polling/IRQ/DMA works.
-
-### Service/Application
-
-- logical behavior remains hardware-independent.
-
-## 19. Automated Checks
-
-Run:
-
-```bash
-make check-layers
-make clean
-make
-make size
-```
-
-## 20. Port Acceptance Checklist
-
--  linker matches memory;
--  startup matches device;
--  clock tree verified;
--  register map verified;
--  BSP pins verified;
--  MCAL peripheral verified;
--  IRQ numbers/handlers verified;
--  DMA mapping verified if used;
--  OpenOCD connects;
--  layer checker passes;
--  clean build passes;
--  hardware behavior matches the original logical contract.
+[← Adding a module](adding_a_module.md) · [↑ Template README](../README.md) · [Root](../../README.md)

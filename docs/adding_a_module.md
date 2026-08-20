@@ -1,419 +1,208 @@
-# Adding a New Module
+# Project Template - Adding a Module
 
-## 1. Start from the Requirement, Not from a Register
+> **Purpose:** a register-first but architecture-safe workflow for adding a new STM32 peripheral, board capability, service, or external component to the template.
 
-Describe the desired behavior first.
+[← Architecture](architecture.md) · [Template README](../README.md) · [Porting →](porting_guide.md)
 
-Examples:
+## Table of contents
 
-```text
-"Application needs a debounced button event."
-"Application needs a 1 kHz PWM output."
-"Application needs to store data in external NOR flash."
-```
+- [Start from ownership](#start-from-ownership)
+- [Step 1 - write the hardware contract](#step-1---write-the-hardware-contract)
+- [Step 2 - extend the device model](#step-2---extend-the-device-model)
+- [Step 3 - implement MCAL](#step-3---implement-mcal)
+- [Step 4 - bind the board](#step-4---bind-the-board)
+- [Step 5 - add ECUAL or Service when justified](#step-5---add-ecual-or-service-when-justified)
+- [Step 6 - compose and expose Application policy](#step-6---compose-and-expose-application-policy)
+- [Interrupt and DMA design](#interrupt-and-dma-design)
+- [Validation](#validation)
+- [References](#references)
 
-Then decide which layers are required.
+## Start from ownership
 
-## 2. Decide Which Layer Owns the Module
+Before writing a line of driver code, decide what you are adding:
 
-| Responsibility | Layer |
+| Need | Correct home |
 |---|---|
-| product policy | Application |
-| logical capability | Service |
-| board mapping | BSP |
-| external-device protocol | ECUAL |
-| MCU peripheral implementation | MCAL |
-| STM32 register definitions | Platform Device |
-| Cortex-M core support | Platform Architecture |
-| generic utility | Common |
-| initialization order | System |
+| new product behavior | `app` |
+| portable logical capability | `services` |
+| physical Blue Pill mapping | `bsp/bluepill` |
+| protocol for an external IC | `ecual` |
+| STM32 peripheral mechanism | `mcal` |
+| missing register/IRQ definition | `platform/device` |
+| CPU/exception primitive | `platform/arch` |
+| cross-layer construction | `system` |
 
-## 3. Add the MCAL Peripheral
+This prevents the common register-level anti-pattern where a feature starts in `application.c` with direct RCC/GPIO/peripheral writes and becomes impossible to separate later.
 
-Define a generic MCAL API before writing board-specific code.
+## Step 1 - write the hardware contract
 
-### Public MCAL APIs Should Accept Generic Inputs
+Open the STM32F103 datasheet and RM0008 and record:
 
-Prefer:
+```text
+peripheral instance
+clock enable/reset bit
+bus clock source and maximum
+base address
+required registers and reset states
+pin(s), alternate-function/remap rules
+event/flag clear semantics
+IRQ number and priority requirements
+DMA request/channel mapping if applicable
+startup/calibration timing
+error flags and timeout cases
+```
+
+If an external device is involved, do the same from its datasheet: electrical requirements, bus mode/address, startup delay, command framing, state/status model, maximum clock, and destructive operations.
+
+This written contract becomes the basis for both code and documentation.
+
+## Step 2 - extend the device model
+
+Add the minimum device facts required by the driver.
+
+### Base address
+
+Put the address in the device memory-map header, derived from the correct APB/AHB base and offset.
+
+### Register layout
+
+Create or extend a `volatile` structure in register order. Preserve reserved gaps explicitly when needed so later fields remain at the documented offsets. Treat read-only fields as `volatile const` if the code should not write them.
+
+### Bit fields
+
+Define named masks/encodings in the register-bits header. Prefer:
 
 ```c
-bool mcal_timer_init(uint32_t timer_clock_hz,
-                     uint32_t target_tick_hz);
+#define STM32_FOO_CR_ENABLE (UINT32_C(1) << 0U)
 ```
 
-rather than:
+over repeating a magic `0x1` in multiple driver functions.
 
-```c
-bool timer_for_bluepill_led_init(void);
-```
+### IRQ identity
 
-Board meaning belongs in BSP.
+Add the vector/IRQ number only if the feature needs it and verify it against the device vector table.
 
-## 4. Add the Base Address
+## Step 3 - implement MCAL
 
-If the peripheral is not yet modeled, add its base address in Platform Device.
-
-Use the STM32F103 memory map.
-
-Do not scatter numeric addresses through MCAL source.
-
-## 5. Add the Register Structure
-
-Define the register block layout with the correct:
-
-- order;
-- offsets;
-- `volatile`;
-- read-only/read-write qualifiers.
-
-Check reserved gaps carefully.
-
-## 6. Add Bit Definitions
-
-Add named masks/shifts for every register field used by MCAL.
-
-Avoid unexplained hexadecimal literals in MCAL logic.
-
-## 7. Add RCC Clock/Reset Support
-
-A peripheral normally needs:
-
-- clock enable;
-- optional peripheral reset;
-- correct bus source.
-
-Keep RCC manipulation inside MCAL.
-
-## 8. Add GPIO Alternate-Function Support
-
-Verify each pin mode:
-
-- output push-pull;
-- alternate-function push-pull;
-- alternate-function open-drain;
-- floating input;
-- pull-up/pull-down;
-- analog.
-
-Do not assume one peripheral's mode applies to another.
-
-## 9. Design Polling
-
-Polling must be:
-
-- immediate/non-blocking, or
-- bounded by a timeout/poll count.
-
-Do not introduce an infinite hardware wait.
-
-## 10. Design Interrupt Handoff
-
-### Event Bit
-
-Useful for a single edge.
-
-### Ring Buffer
-
-Useful for byte streams.
-
-### Block Event
-
-Useful for DMA/sample blocks.
-
-The ISR publishes low-level state and returns.
-
-## 11. NVIC
-
-Add/extend MCAL NVIC support rather than configuring NVIC directly from
-Application/BSP when a reusable mapping is appropriate.
-
-Configure:
-
-- IRQ number;
-- priority;
-- pending clear;
-- enable/disable.
-
-## 12. Strong Handler Name
-
-The handler must exactly match startup.
-
-Examples:
-
-```c
-void EXTI0_IRQHandler(void);
-void USART1_IRQHandler(void);
-void DMA1_Channel1_IRQHandler(void);
-```
-
-## 13. Add a Board Resource
-
-BSP maps the generic MCAL peripheral to the physical board resource.
-
-Examples:
+MCAL should expose behavior, not register aliases. A good API answers questions such as:
 
 ```text
-STATUS_LED -> PC13
-DISPLAY_I2C -> I2C1 PB6/PB7
-MEMORY_SPI -> SPI1 PA4..PA7
+configure GPIO mode
+initialize UART at baud using supplied PCLK
+start timer trigger at requested rate
+try to transfer a byte with bounded polling
+take and clear IRQ events
 ```
 
-## 14. `board_pins.h`
+It should validate inputs before touching hardware and return status when requested settings cannot be represented.
 
-Keep physical pin definitions in BSP.
+For timing-sensitive peripherals, pass/query the actual clock. Do not bake the normal 72 MHz clock into PSC/BRR/CCR constants.
 
-Application and Services should never contain pin numbers.
+For hardware waits, decide whether the operation:
 
-## 15. Add an External-Device ECUAL
+- must be non-blocking;
+- can use bounded polling;
+- requires an interrupt/event handoff;
+- requires DMA;
+- requires a wall-clock timeout rather than iteration limit.
 
-If the new hardware is off-chip, create an ECUAL driver for:
+Make that choice explicit in the API and documentation.
 
-- command set;
-- register map;
-- device geometry;
-- protocol state.
+## Step 4 - bind the board
 
-## 16. Transport Callback for ECUAL
-
-Prefer a transport object/function pointers:
+BSP answers “which concrete resource implements this capability on this board?” Examples from the repository include:
 
 ```text
-write
-transfer
-select/deselect
-delay
+status LED -> PC13 active-low
+button -> PA0 active-low / EXTI0
+serial -> USART1 on PA9/PA10
+OLED bus -> I2C1 PB6/PB7
+flash bus -> SPI1 PA4..PA7
+ADC input -> PA0 ADC1_IN0
 ```
 
-This allows the ECUAL driver to remain independent from BSP/MCAL.
+Board code should configure pins and instantiate the MCAL capability without leaking these identities upward.
 
-## 17. Add a Service
+## Step 5 - add ECUAL or Service when justified
 
-Create a Service when Application should consume a logical capability rather
-than a specific device.
+### ECUAL
 
-Examples:
+Use ECUAL when the new module speaks to a distinct external component whose protocol can be independent of the MCU transport. Inject a small transport interface rather than including STM32 bus headers inside the device driver.
 
-```text
-SSD1306 -> Display Service
-W25Q64 -> Memory Service
-raw ADC block -> ADC Service
+### Service
+
+Use a Service when Application should see a logical capability instead of a board/peripheral API. A service may own filtering, semantic events, statistics, or logical state, but should not become a dumping ground for register details.
+
+Not every MCAL requires both layers. The smallest correct architecture is preferable.
+
+## Step 6 - compose and expose Application policy
+
+Add modules to `system_init()` in dependency order. Then implement Application through Service APIs.
+
+```mermaid
+flowchart TD
+    DEV["device register model"] --> MCAL["MCAL driver"]
+    MCAL --> BSP["BSP binding"]
+    MCAL --> ECUAL["ECUAL transport user when needed"]
+    BSP --> SVC["Service capability"]
+    ECUAL --> SVC
+    SVC --> APP["Application policy"]
+    SYS["system_init()"] -. constructs in order .-> BSP
+    SYS -. constructs in order .-> SVC
+    SYS -. constructs in order .-> APP
 ```
 
-## 18. Service Processing Pattern
+If Application must know a register bit to use the feature, the abstraction boundary is not finished.
 
-Keep Service processing bounded.
+## Interrupt and DMA design
 
-Typical:
+For an interrupt-driven module, write the ownership table before coding:
 
-```c
-void service_process(void)
-{
-    if (!work_pending())
-    {
-        return;
-    }
+| State | Producer | Consumer | Protection |
+|---|---|---|---|
+| event bit | ISR | thread | atomic take under PRIMASK |
+| RX ring head | ISR | thread reads | SPSC ownership |
+| RX ring tail | thread | ISR reads | SPSC ownership |
+| DMA half-buffer | DMA | ISR copies after completion | hardware event boundary |
+| published block | ISR | thread | ready flag + critical copy |
 
-    /* bounded processing */
-}
-```
+Choose overflow semantics deliberately: drop newest, drop oldest, coalesce, count, block producer, or fail. “It probably won't overflow” is not a policy.
 
-## 19. Add Application Behavior
+Keep ISR work bounded and never call Application directly from an interrupt in this repository architecture.
 
-Application should express policy only.
+## Validation
 
-Good:
-
-```text
-if measurement >= threshold -> indicator on
-```
-
-Bad:
-
-```text
-if ADC1->DR > 2000 -> GPIOC->BRR = ...
-```
-
-## 20. Update `system_init()`
-
-Initialize from bottom to top.
-
-Typical:
-
-```text
-board_init()
-service_init()
-external_device_init()
-application_init()
-```
-
-Return `false` if a required component fails.
-
-## 21. Global IRQ Lifecycle
-
-Remember that the standard examples disable global interrupts before
-`system_init()`.
-
-Therefore:
-
-- SysTick IRQ does not advance during early initialization;
-- interrupt-driven waits cannot be used in that phase;
-- busy settling delays used before IRQ enable must be independent from SysTick.
-
-This is especially important for external-device power-on delays.
-
-## 22. Add Configuration
-
-Put tunable values in `config/`.
-
-Examples:
-
-```text
-clock
-frequency
-timeout
-buffer size
-address
-threshold
-sample rate
-debounce
-```
-
-## 23. Compile-Time Validation
-
-Reject invalid relationships early.
-
-Examples:
-
-```text
-buffer size < 2
-DMA sample count odd
-frequency = 0
-page write > 256
-invalid I2C address
-ADC clock limit exceeded
-```
-
-## 24. Do Not Use Heap Allocation
-
-Prefer:
-
-```text
-static buffers
-fixed capacities
-explicit ownership
-```
-
-This improves predictability and ISR safety.
-
-## 25. Add Debug Observability
-
-Expose useful counters/state such as:
-
-```text
-overflow count
-error count
-sequence
-JEDEC ID
-verification flags
-```
-
-Do not add unnecessary I/O solely for debugging when GDB can inspect the
-state.
-
-## 26. Update Documentation
-
-### README
-
-Document:
-
-- wiring;
-- configuration;
-- initialization;
-- runtime behavior;
-- expected result;
-- troubleshooting.
-
-### `architecture.md`
-
-Document:
-
-- ownership;
-- data flow;
-- ISR boundary;
-- concurrency;
-- failure path.
-
-### `porting_guide.md`
-
-Document:
-
-- pins;
-- clock;
-- peripheral instance;
-- IRQ/DMA mapping;
-- validation.
-
-## 27. Run the Layer Checker
+Run layers first:
 
 ```bash
-make check-layers
+python3 tools/scripts/check_layers.py
 ```
 
-Fix architecture violations instead of weakening the checker.
-
-## 28. Build Cleanly
+Then compile/link and inspect:
 
 ```bash
-make clean
 make
-```
-
-## 29. Inspect Map/Symbols
-
-Use:
-
-```bash
 make size
 ```
 
-and inspect the map/listing when verifying:
+Use the map file to confirm section/RAM growth and the listing to inspect critical register sequences. Bring up hardware from the bottom:
 
-- memory use;
-- handler ownership;
-- static buffers;
-- section placement.
+```text
+clock -> GPIO -> peripheral reset/enable -> static configuration
+      -> status flags -> single primitive -> service -> application behavior
+```
 
-## 30. Hardware Bring-Up Strategy
+For IRQ/DMA features, test error/full/timeout/overrun paths, not only the happy path.
 
-Bring up in layers:
+## References
 
-1. power/wiring;
-2. clock;
-3. GPIO;
-4. peripheral registers;
-5. polling/IRQ/DMA;
-6. BSP;
-7. Service;
-8. Application.
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-## 31. Module Addition Checklist
+---
 
--  requirement defined;
--  correct layer chosen;
--  base/register/bit definitions added;
--  MCAL API generic;
--  RCC/GPIO setup correct;
--  polling bounded;
--  ISR ownership correct;
--  NVIC configured through proper layer;
--  BSP mapping added;
--  ECUAL transport clean;
--  Service hardware-independent;
--  Application contains no low-level include;
--  IRQ lifecycle considered;
--  compile-time validation added;
--  debug observability added;
--  docs updated;
--  layer checker passes;
--  clean build passes;
--  hardware test passes.
+[← Architecture](architecture.md) · [↑ Template README](../README.md) · [Porting →](porting_guide.md)

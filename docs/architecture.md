@@ -1,400 +1,152 @@
-# Template Architecture and Dependency Rules
+# Project Template - Architecture
 
-## 1. Runtime Layers
+> **Focus:** the structural contracts that a new register-level project inherits before any peripheral driver is added.
 
-```text
-Application
-    |
-    v
-Services
-    |
-    +------> BSP
-    |
-    +------> ECUAL
-                  |
-                  v
-                 MCAL
-                  |
-                  v
-          Platform Device
-                  |
-                  v
-       Platform Architecture
-```
+[← Template README](../README.md) · [Adding a module →](adding_a_module.md) · [Porting](porting_guide.md) · [Root](../../README.md)
 
-System is the composition root and is not a layer that Application consumes.
+## Table of contents
 
-## 2. Dependency Matrix
+- [Architecture objective](#architecture-objective)
+- [Reset and memory contract](#reset-and-memory-contract)
+- [Dependency graph](#dependency-graph)
+- [Composition root](#composition-root)
+- [Platform split](#platform-split)
+- [Interrupt ownership](#interrupt-ownership)
+- [Failure and idle policy](#failure-and-idle-policy)
+- [Architecture review checklist](#architecture-review-checklist)
+- [References](#references)
 
-The project checker enforces a downward dependency direction similar to:
+## Architecture objective
 
-| Source layer | Allowed project dependencies |
-|---|---|
-| Application | Application, Services, Common, Config |
-| Services | Services, BSP, ECUAL, Common, Config |
-| ECUAL | ECUAL, MCAL, Common, Config |
-| BSP | BSP, MCAL, Common, Config |
-| MCAL | MCAL, Platform, Common, Config |
-| Platform | Platform, Common, Config |
-
-`system/` may include all layers because it wires the runtime together.
-
-## 3. Application
-
-Application owns product/demo policy.
-
-### Good
+The template separates **hardware knowledge** from **product policy** without hiding how the hardware works. This is the central design constraint of the whole repository.
 
 ```text
-if button pressed -> toggle indicator
-if 500 ms elapsed -> update state
-if ADC voltage high -> turn indicator on
+Product decision: "send a byte" / "show status" / "sample sensor"
+        |
+        v
+Service API
+        |
+        v
+Board/external-device binding
+        |
+        v
+MCU register sequence
+        |
+        v
+Memory-mapped peripheral
 ```
 
-### Bad
+The intent is not to imitate a large framework. It is to keep each register sequence in a place where its assumptions can be reviewed against the reference manual.
+
+## Reset and memory contract
+
+The linker and startup code form one inseparable contract:
+
+```mermaid
+flowchart TD
+    LINK["linker emits _sidata/_sdata/_edata/_sbss/_ebss/_estack"] --> RESET["vector table uses _estack and Reset_Handler"]
+    RESET --> DATA["runtime_init copies .data"]
+    DATA --> BSS["runtime_init clears .bss"]
+    BSS --> MAIN["main()"]
+```
+
+Changing memory geometry without updating the linker changes `_estack`, section placement, and the static-stack collision assertion. Replacing startup without understanding those linker symbols can leave initialized/static C objects invalid before `main()` even begins.
+
+The template reserves 1 KiB as `_Min_Stack_Size` for link-time collision detection. This is not dynamic stack measurement or proof of worst-case interrupt nesting.
+
+## Dependency graph
+
+The checker encodes allowed include edges. The most important rules are:
+
+- Application may not include BSP/MCAL/platform directly.
+- Services may depend on BSP/ECUAL but not raw platform.
+- BSP and ECUAL may use MCAL.
+- MCAL may use platform.
+- platform has no upward dependency.
+- system is allowed to see all layers because it composes them.
+
+This creates a one-way technical-debt barrier. If a new module cannot be placed without violating the graph, first ask whether its responsibility is incorrectly defined.
+
+## Composition root
+
+`system/system_init.c` is where concrete dependencies meet. In the untouched template it initializes `board_init()` and then Application. A real project grows this sequence explicitly:
 
 ```text
-write GPIO register
-set USART BRR
-clear DMA flags
-configure RCC bits
+board / MCAL-backed resources
+        -> services / ECUAL
+        -> application
 ```
 
-Those are lower-layer responsibilities.
+Avoid allowing services to initialize unrelated global modules behind the scenes. Explicit composition makes failure order and dependencies reviewable.
 
-## 4. Services
+## Platform split
 
-Services expose stable logical capabilities:
+There are two different meanings of “platform”:
 
-- time;
-- button;
-- indication;
-- serial;
-- PWM;
-- display;
-- memory;
-- ADC measurement.
+### `platform/arch/cortex-m3`
 
-They may debounce, filter, aggregate, or translate units.
+Owns CPU/exception architecture details:
 
-## 5. BSP
+- CPSIE/CPSID;
+- PRIMASK save/restore model;
+- WFI/NOP/barriers;
+- SysTick/NVIC/SCB core register mappings;
+- system-reset request through AIRCR.
 
-BSP owns board-specific resource selection:
+### `platform/device/stm32f103xb`
 
-- pin number;
-- port;
-- peripheral instance;
-- active polarity;
-- wiring;
-- board-level transport composition.
+Should own device-specific peripheral facts:
 
-BSP calls MCAL rather than Platform registers directly.
+- peripheral base addresses;
+- register-layout structures;
+- bit masks and encoded values;
+- IRQ numbers/identities.
 
-## 6. ECUAL
+MCAL sits above both. This split makes “move to another STM32F1 device” a different problem from “move to a non-Cortex-M CPU,” which is exactly the distinction a porting guide should expose.
 
-ECUAL owns off-chip device semantics.
+## Interrupt ownership
 
-### Transport Callback Pattern
+Before enabling an IRQ, document:
 
-A reusable external-device driver should receive a generic transport rather
-than include BSP or MCAL.
+1. which module owns the vector;
+2. which flags must be acknowledged and how;
+3. what minimum state must be copied/latching in ISR;
+4. who consumes that state in thread mode;
+5. whether multiple events may be coalesced or must be counted/queued;
+6. what operation is atomic and what needs a critical section;
+7. maximum bounded ISR work;
+8. failure/overflow semantics.
 
-Example:
+Do not use `volatile` as a substitute for this ownership design.
 
-```text
-Display Service
-    |
-SSD1306 ECUAL
-    ^
-    |
-transport callbacks
-    |
-Board Display Bus
-    |
-MCAL I2C
-```
+## Failure and idle policy
 
-This keeps the device driver portable.
+The template's initialization result is a boolean. Required-resource failure should propagate to `system_init()` and then panic. A future project may add a richer error taxonomy, but it should preserve the property that Application does not begin with a silently invalid required resource.
 
-## 7. MCAL
+The template idles with `WFI`. A completed example may choose NOP for debug reasons. Neither is universally correct: WFI requires a valid wake model, while NOP spends power. The decision belongs in system policy.
 
-MCAL owns generic STM32 peripheral behavior.
+## Architecture review checklist
 
-Public MCAL APIs should accept generic arguments rather than board pin names.
+- Can Application compile without any STM32 register header?
+- Does every physical pin/peripheral instance have one board owner?
+- Are external-device protocols independent of a specific MCU bus driver?
+- Are device register definitions limited to what the project uses?
+- Can every IRQ shared variable name its producer and consumer?
+- Do critical sections restore prior interrupt state?
+- Is initialization order explicit and lower-to-higher?
+- Are polling loops bounded when hardware may never respond?
+- Is timing derived from the active clock?
+- Does `check_layers.py` still pass?
 
-Examples:
+## References
 
-```text
-mcal_gpio_configure()
-mcal_spi_transfer()
-mcal_i2c_init()
-mcal_systick_init()
-```
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-## 8. Platform Device
+---
 
-Platform Device owns STM32F103-specific register knowledge:
-
-- base addresses;
-- register structures;
-- bit definitions;
-- interrupt numbers;
-- memory map.
-
-MCAL is the main consumer.
-
-## 9. Platform Architecture
-
-Platform Architecture owns Cortex-M3 core behavior:
-
-- NVIC register model;
-- SysTick core register model;
-- PRIMASK;
-- `NOP`;
-- `WFI`;
-- IRQ enable/disable.
-
-The device layer should not duplicate architecture-core definitions.
-
-## 10. Common
-
-Common contains portable utilities and types.
-
-Examples:
-
-- byte ring buffer;
-- measurement structures;
-- compiler helpers;
-- generic status types.
-
-Common should not depend on board or MCU registers.
-
-## 11. System as Composition Root
-
-System is allowed to know multiple layers because it performs initialization.
-
-Example:
-
-```text
-board_init()
-time_service_init()
-display_service_init()
-application_init()
-```
-
-System must not become a second Application module.
-
-## 12. Initialization Order
-
-Initialize from lower dependency to upper dependency.
-
-```text
-clock/peripheral
-    |
-board resource
-    |
-service / external device
-    |
-application
-```
-
-Never initialize a Service before the hardware resource it requires.
-
-## 13. Interrupt Ownership
-
-The lowest module that owns the peripheral owns the strong handler.
-
-Examples:
-
-```text
-MCAL SysTick -> SysTick_Handler
-MCAL UART    -> USART1_IRQHandler
-Board ADC/DMA -> DMA1_Channel1_IRQHandler
-```
-
-The handler may publish low-level state upward only through static flags,
-counters, buffers, or blocks.
-
-## 14. Interrupt-to-Thread Handoff Patterns
-
-### Event Bit
-
-```text
-ISR: event_pending = true
-thread: take-and-clear
-```
-
-### Counter
-
-Use when every event count matters.
-
-### Ring Buffer
-
-```text
-ISR producer -> ring -> thread consumer
-thread producer -> ring -> ISR consumer
-```
-
-### Block-Ready
-
-```text
-DMA IRQ -> completed block -> Service
-```
-
-Useful for sampled data.
-
-## 15. Critical Sections
-
-Use a short critical section only around atomic shared-state operations.
-
-Pattern:
-
-```text
-save PRIMASK
-disable IRQ
-copy/read-clear shared state
-restore PRIMASK
-```
-
-Never keep interrupts disabled while performing:
-
-- I2C polling;
-- SPI flash operations;
-- formatting;
-- long memory copies unless strictly justified.
-
-## 16. Volatile
-
-Use `volatile` when state may change asynchronously.
-
-`volatile` does not guarantee:
-
-- atomic read-modify-write;
-- queue correctness;
-- mutual exclusion;
-- memory ownership.
-
-Use explicit concurrency design.
-
-## 17. Polling API Naming
-
-Prefer:
-
-```text
-try_read
-try_write
-take_event
-is_ready
-process
-```
-
-If an operation may wait, document the timeout or poll bound.
-
-## 18. Error Handling
-
-Represent low-level failure using:
-
-- `bool`;
-- error/status enum;
-- counter;
-- pending event.
-
-Examples:
-
-```text
-UART overflow
-I2C timeout
-SPI timeout
-DMA transfer error
-ADC calibration failure
-```
-
-Do not silently discard important fault information.
-
-## 19. Clock Ownership
-
-Application expresses behavior in:
-
-```text
-milliseconds
-Hz
-baud
-permille
-millivolts
-```
-
-MCAL/BSP converts those values using the actual clock tree.
-
-Application must not know PSC, ARR, BRR, CCR, or ADCPRE values.
-
-## 20. Board Active Level
-
-Active-low hardware must be hidden below the logical Service boundary.
-
-For the Blue Pill LED:
-
-```text
-logical ON -> BSP drives PC13 LOW
-```
-
-Application still requests "ON", not "LOW".
-
-## 21. External-Device Geometry
-
-External-device geometry belongs to ECUAL/configuration.
-
-Examples:
-
-```text
-SSD1306: 128 x 64
-W25Q64: 8 MiB, 256-byte pages, 4 KiB sectors
-```
-
-Application should not construct raw bus frames.
-
-## 22. Build-Time Configuration
-
-Use `config/` for:
-
-- baud rate;
-- timeout;
-- buffer size;
-- debounce interval;
-- bus speed;
-- PWM rate;
-- sample rate;
-- threshold;
-- external-device address.
-
-Compile-time validation should reject impossible values.
-
-## 23. Dependency Checker Limitations
-
-The checker validates includes, not behavior.
-
-It cannot detect:
-
-- races;
-- incorrect register bits;
-- ISR latency;
-- bad clock math;
-- electrical problems;
-- hidden coupling through globals.
-
-Architecture review and hardware testing are still required.
-
-## 24. Architectural Acceptance Checklist
-
--  Application has no low-level includes.
--  Services contain no register access.
--  BSP owns board mapping.
--  ECUAL owns external-device protocol.
--  MCAL owns generic peripheral behavior.
--  Platform owns register/core definitions.
--  ISR belongs to the lowest owner.
--  ISR work is bounded.
--  thread handoff is explicit.
--  shared state ownership is clear.
--  clocks are translated below Application.
--  errors are observable.
--  `make check-layers` passes.
+[← Template README](../README.md) · [Adding a module →](adding_a_module.md)

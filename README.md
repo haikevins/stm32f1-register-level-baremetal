@@ -1,467 +1,170 @@
-# STM32F103 Register-Level Bare-Metal Template
+# STM32F1 Register-Level Bare-Metal Project Template
 
-## 1. When to Use This Template
+> **Scope:** a deliberately minimal starting point that preserves the repository's startup, linker, layering, composition-root, debug, and build contracts while leaving product/peripheral modules empty for a new register-level project.
 
-Use this template when starting a small STM32F103C8T6 project that should:
+[← Root README](../README.md) · [Examples](../examples/README.md) · [Architecture](docs/architecture.md) · [Adding a module](docs/adding_a_module.md) · [Porting](docs/porting_guide.md)
 
-- access peripherals through your own MCAL and register definitions;
-- own startup and linker behavior;
-- keep Application independent from hardware registers;
-- use explicit initialization order;
-- use a cooperative super-loop;
-- avoid HAL/LL/SPL/RTOS framework ownership.
+## Table of contents
 
-The template is intentionally minimal. It is a foundation for building new
-examples or projects, not a finished application.
+- [What the template already owns](#what-the-template-already-owns)
+- [What is intentionally empty](#what-is-intentionally-empty)
+- [Runtime and composition](#runtime-and-composition)
+- [Layer contract](#layer-contract)
+- [Build and debug](#build-and-debug)
+- [How to start a new project](#how-to-start-a-new-project)
+- [Design rules](#design-rules)
+- [References](#references)
 
-## 2. Current Target
+## What the template already owns
 
-| Item | Value |
-|---|---|
-| MCU | STM32F103C8T6 |
-| CPU | Arm Cortex-M3 |
-| Flash | 64 KiB |
-| SRAM | 20 KiB |
-| External crystal | 8 MHz HSE |
-| Normal clock target | 72 MHz |
-| Language | C11 + GNU assembler |
-| Build | GNU Make |
-| Debug | OpenOCD + GDB |
-| Peripheral access | custom register definitions |
+The template is not an empty directory tree. It already provides the infrastructure that every example repeats:
 
-## 3. Directory Structure
+- STM32F103C8T6 linker memory regions: 64 KiB Flash, 20 KiB SRAM;
+- vector table and weak exception handlers;
+- `Reset_Handler -> runtime_init()` path;
+- `.data` copy and `.bss` zeroing;
+- system composition root and fault/panic policy;
+- Cortex-M3 architecture helpers for IRQ control, PRIMASK, WFI, barriers, reset, and NOP;
+- hand-owned build system with freestanding Cortex-M3 flags;
+- OpenOCD ST-Link/SWD configuration;
+- GDB launch script;
+- static include-layer checker.
 
-```text
-app/
-services/
-ecual/
-bsp/bluepill/
-mcal/
-platform/
-common/
-config/
-system/
-startup/
-linker/
-tests/
-tools/
-docs/
-```
+This allows a new project to begin by adding only the device/peripheral surface it actually needs.
 
-The directory layout represents dependency ownership.
+## What is intentionally empty
 
-## 4. Target Architecture
+The skeleton deliberately contains no prebuilt GPIO/UART/timer driver. Current implementation state is:
 
 ```text
-Application
-    |
-    v
-Services
-    |
-    +------> BSP
-    |
-    +------> ECUAL
-                  |
-                  v
-                 MCAL
-                  |
-                  v
-          Platform Device
-                  |
-                  v
-       Platform Architecture
+application_init()       -> no product initialization yet
+application_process()    -> no product behavior yet
+board_init()             -> returns true, no board peripherals configured
+services/                -> placeholders only
+ecual/                   -> placeholders only
+mcal/                    -> placeholders only
+platform/device/         -> add the device register surface required by the project
 ```
 
-`system/` is the composition root.
+`config/project_config.h` is also intentionally empty except for its include guard and comment.
 
-## 5. Dependency Rules
+The template therefore teaches an important rule: **copy architecture, not unused drivers**. A new feature should bring in the minimum register model and modules it needs, with explicit ownership.
 
-### Application
+## Runtime and composition
 
-May depend on:
+```mermaid
+flowchart TD
+    RESET["Reset"] --> START["Reset_Handler"]
+    START --> CRT["runtime_init(): .data copy + .bss clear"]
+    CRT --> MAIN["main()"]
+    MAIN --> OFF["disable global IRQ"]
+    OFF --> INIT["system_init()"]
+    INIT --> BOARD["board_init()"]
+    BOARD --> APPINIT["application_init()"]
+    APPINIT --> ON["enable global IRQ"]
+    ON --> LOOP["application_process()"]
+    LOOP --> IDLE["system_idle(): WFI in template"]
+    IDLE --> LOOP
+```
+
+The template differs intentionally from the completed examples in one visible way: `system_idle()` uses `cortex_m3_wait_for_interrupt()` rather than NOP. This demonstrates the normal low-power idle shape, but a concrete project must ensure it has a wake source and that its debugger/reset strategy works with WFI before retaining it.
+
+`system_panic()` disables interrupts and also waits in a WFI loop. If a new project needs debugger-always-responsive panic behavior, watchdog recovery, fault logging, or a hardware safe-state, that policy belongs in `system/system_control.c` rather than being scattered through drivers.
+
+## Layer contract
+
+The template's `check_layers.py` enforces the same dependency rules as the examples:
+
+```mermaid
+flowchart TD
+    APP["app"] --> SVC["services"]
+    SVC --> BSP["bsp"]
+    SVC --> ECUAL["ecual"]
+    BSP --> MCAL["mcal"]
+    ECUAL --> MCAL
+    MCAL --> PLATFORM["platform"]
+    COMMON["common/config"]
+    SYS["system composition root"] -. may compose all .-> APP
+```
+
+The practical rule for register-level work is simple:
+
+> Add raw STM32 addresses, register layouts, and field encodings at the platform/device boundary; consume them from MCAL; do not leak them upward because it is convenient.
+
+[Architecture](docs/architecture.md) explains this contract in more detail.
+
+## Build and debug
+
+The template Makefile uses:
 
 ```text
-Application
-Services
-Common
-Config
+-mcpu=cortex-m3 -mthumb
+-std=c11 -Og -g3
+-ffreestanding -fno-builtin
+-ffunction-sections -fdata-sections
+-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wundef
+-nostartfiles -nostdlib
+-Tlinker/stm32f103c8t6.ld
+-Wl,--gc-sections
+-lgcc
 ```
 
-Must not include BSP, ECUAL, MCAL, Platform, or register headers.
+Assembler input also uses `--noexecstack`. Outputs are ELF, BIN, HEX, LST, map, and size information.
 
-### Services
-
-May depend on:
-
-```text
-Services
-BSP
-ECUAL
-Common
-Config
-```
-
-Must remain independent from raw STM32 registers.
-
-### BSP
-
-Owns physical board resources:
-
-- pins;
-- peripheral instance selection;
-- active polarity;
-- board wiring;
-- composition of MCAL resources.
-
-BSP may depend on MCAL.
-
-### ECUAL
-
-Owns off-chip device protocols such as:
-
-- SSD1306;
-- W25Q64;
-- sensors;
-- EEPROMs.
-
-ECUAL should depend on generic transport APIs rather than a particular board
-pin map.
-
-### MCAL
-
-Owns MCU peripheral behavior:
-
-- RCC;
-- GPIO;
-- SysTick;
-- EXTI;
-- NVIC;
-- USART;
-- timers;
-- I2C;
-- SPI;
-- ADC;
-- DMA.
-
-MCAL depends on Platform Device and Platform Architecture where required.
-
-### Platform
-
-Platform Device owns:
-
-- base addresses;
-- register structures;
-- bit definitions;
-- IRQ numbers.
-
-Platform Architecture owns Cortex-M3 core instructions and registers.
-
-## 6. Layer Checker
-
-Run:
+Commands:
 
 ```bash
 make check-layers
-```
-
-The checker rejects forbidden project-header dependencies.
-
-It is intentionally simple and should be treated as a guardrail, not a
-replacement for design review.
-
-## 7. Startup Sequence
-
-The startup assembly provides the vector table and Reset Handler.
-
-Conceptual sequence:
-
-```text
-Reset_Handler
-    |
-    +--> initialize stack from vector table
-    +--> copy .data
-    +--> zero .bss
-    +--> call main()
-```
-
-Unused handlers are weak aliases to `Default_Handler`.
-
-A module takes ownership of an interrupt by implementing the exact strong
-handler name expected by the vector table.
-
-## 8. Runtime Initialization
-
-The common runtime pattern is:
-
-```text
-main()
-    |
-    +--> disable global IRQ
-    +--> system_init()
-    +--> enable global IRQ
-    +--> super-loop
-```
-
-This means initialization code cannot assume an interrupt-driven timebase is
-already advancing.
-
-If startup hardware settling is required before IRQ enable, use a bounded
-busy-wait implementation designed for that phase.
-
-## 9. Linker Script
-
-The linker script defines:
-
-- FLASH origin/length;
-- RAM origin/length;
-- vector placement;
-- `.text`;
-- `.data`;
-- `.bss`;
-- stack top symbols.
-
-When porting to another MCU density, update the linker memory geometry before
-trusting the build.
-
-## 10. Vector Table and Interrupt Extension
-
-To add an interrupt:
-
-1. verify the vector name in startup;
-2. configure the peripheral;
-3. clear stale pending flags;
-4. configure the NVIC through MCAL;
-5. implement the strong handler in the lowest owning module;
-6. keep the ISR bounded;
-7. hand data/events to thread mode.
-
-## 11. Fault Handling
-
-Fault handlers default to the startup `Default_Handler` unless a project
-provides dedicated handlers.
-
-A production project can add:
-
-- HardFault diagnostics;
-- stacked-register capture;
-- reset reason logging;
-- watchdog recovery.
-
-Keep those mechanisms below Application policy where possible.
-
-## 12. `main()` and Composition
-
-The normal `main()` structure is:
-
-```c
-int main(void)
-{
-    cortex_m3_disable_irq();
-
-    if (!system_init())
-    {
-        system_panic();
-    }
-
-    cortex_m3_enable_irq();
-
-    for (;;)
-    {
-        application_process();
-        system_idle();
-    }
-}
-```
-
-Application behavior stays in `app/`.
-
-## 13. Template Idle Behavior
-
-### Using `WFI`
-
-`WFI` is appropriate when:
-
-- the system has reliable interrupt wake sources;
-- low-power idle is desired;
-- debug/reset behavior is acceptable.
-
-### Using `NOP`
-
-`NOP` is appropriate when:
-
-- predictable SWD attach is more important than low power;
-- the debug probe has no NRST connection;
-- the educational project should visibly continue executing.
-
-The completed examples use `NOP`.
-
-## 14. Cortex-M3 Abstraction
-
-The Architecture layer exposes helpers such as:
-
-```text
-NOP
-WFI
-enable IRQ
-disable IRQ
-PRIMASK access
-```
-
-Core-register definitions such as NVIC, SCB, and SysTick belong in the
-Cortex-M3 platform layer.
-
-Upper layers should not use inline assembly directly.
-
-## 15. Device Layer Skeleton
-
-Platform Device contains the STM32F103 register-level model.
-
-Typical files define:
-
-```text
-memory base addresses
-peripheral register structs
-register bit masks
-IRQ numbers
-device constants
-```
-
-MCAL consumes these definitions.
-
-Application and Services must not.
-
-## 16. Makefile
-
-The Makefile:
-
-- discovers project C/assembly sources;
-- applies Cortex-M3 compiler flags;
-- links with the STM32F103C8T6 linker script;
-- generates binary/hex/listing/map files;
-- supports OpenOCD/GDB;
-- runs the architecture checker.
-
-## 17. Build Artifacts
-
-Typical output:
-
-```text
-build/firmware.elf
-build/firmware.hex
-build/firmware.bin
-build/firmware.lst
-build/firmware.map
-```
-
-## 18. Make Targets
-
-```bash
 make
-make clean
-make check-layers
 make size
-make tree
 make flash
-make erase
 make debug-server
 make debug
+make clean
 ```
 
-## 19. OpenOCD
+GDB selection prefers `arm-none-eabi-gdb` and falls back to `gdb-multiarch` when available. `make debug` includes an explicit debugger-availability check.
 
-The default setup uses ST-Link with SWD and:
+## How to start a new project
 
-```tcl
-reset_config none
-adapter speed 1000
-```
+1. Copy `template/` to a new project directory.
+2. Define project-wide configuration values in `config/` rather than hard-coding policy in MCAL.
+3. Write down the hardware resource map: pins, peripheral instances, clocks, IRQs, DMA channels.
+4. Add only the necessary device register definitions under `platform/device/`.
+5. Implement the MCU peripheral behavior in MCAL.
+6. Bind physical board resources in BSP.
+7. If an external IC is involved, keep its protocol in ECUAL and inject a BSP/MCAL transport.
+8. Add a service when Application should use a logical capability instead of a board/peripheral API.
+9. Compose modules in `system_init()` in dependency order.
+10. Implement non-blocking Application policy/state machines.
+11. Run the layer checker before bringing up hardware.
+12. Validate with debugger and instruments from clock/pin/register state upward.
 
-This matches a debug connection without NRST.
+See [Adding a Module](docs/adding_a_module.md) for the detailed workflow.
 
-## 20. GDB
+## Design rules
 
-```bash
-# Terminal 1
-make debug-server
+- Keep the platform/device header **minimal and verified** against the reference manual.
+- Avoid unexplained numeric register literals in MCAL; use named masks/encodings.
+- Keep board pin/peripheral identity out of Application.
+- Do not allocate memory dynamically for driver queues/buffers in this repository style.
+- Decide ISR/thread ownership before writing an interrupt handler.
+- Bound status polling that can otherwise stall forever.
+- Make the active clock an input to timing-sensitive driver setup.
+- Preserve previous PRIMASK state in nested helper critical sections.
+- Treat `system_init()` as construction: no normal Application work before it succeeds.
+- Prefer explicit failure over silently continuing with a half-initialized capability.
+- Re-run `check_layers.py` whenever dependencies change.
 
-# Terminal 2
-make debug
-```
+## References
 
-Useful first breakpoints:
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-```gdb
-break main
-break system_init
-break board_init
-```
+---
 
-## 21. Creating a New Project from the Template
-
-Recommended order:
-
-1. copy the template;
-2. define board pins/resources;
-3. add required Platform Device register definitions;
-4. implement MCAL peripheral support;
-5. implement BSP mapping;
-6. add ECUAL if the project has an external device;
-7. add Services;
-8. add Application behavior;
-9. connect initialization in `system_init()`;
-10. add ISR handoff where required;
-11. document wiring/test behavior;
-12. run layer checker;
-13. clean-build;
-14. hardware-test.
-
-## 22. Completion Checklist
-
-### Architecture
-
-- Application has no BSP/MCAL/Platform includes.
-- Services contain no register accesses.
-- BSP owns physical board mapping.
-- ECUAL owns external-device protocol.
-- ISR ownership is explicit.
-
-### Runtime
-
-- `.data` initializes correctly.
-- `.bss` is zeroed.
-- global IRQ lifecycle is intentional.
-- `system_init()` orders dependencies correctly.
-- `application_process()` is bounded.
-- panic behavior is intentional.
-
-### Peripheral
-
-- base address/register struct/bit masks are correct.
-- peripheral clock/reset logic is correct.
-- GPIO mode is correct.
-- bus/timer clock math is correct.
-- errors/timeouts/overflow are defined.
-
-### Tooling
-
-- `make check-layers` passes.
-- clean build passes.
-- map/size are reasonable.
-- OpenOCD connects.
-- GDB symbols are usable.
-
-### Docs
-
-- README explains wiring and behavior.
-- architecture document explains ownership.
-- porting guide explains clock/pin/IRQ changes.
-
-## 23. Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/adding_a_module.md`](docs/adding_a_module.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
-
-## 24. License
-
-See `LICENSE`.
+[← Examples](../examples/README.md) · [Architecture →](docs/architecture.md)
