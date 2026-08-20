@@ -1,312 +1,208 @@
-# 04-uart-interrupt-ring-buffer — USART1 Interrupt + RX/TX Ring Buffer
+# 04 - UART Interrupt Ring Buffer - USART1 RX/TX SPSC Queues
 
-## 1. Learning Objectives
+> **Scope:** USART1 interrupt-driven RX/TX with two power-of-two static ring buffers, explicit ISR/thread producer-consumer ownership, overflow/error telemetry, and TXE interrupt gating.
 
-This example moves UART byte transfer into an interrupt-driven MCAL while
-keeping Application non-blocking.
+[Root](../../README.md) · [Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn:
+## Table of contents
 
-- USART1 RXNE/TXE interrupts;
-- static RX/TX ring buffers;
-- single-producer/single-consumer ownership;
-- TXE interrupt start/stop;
-- short critical sections;
-- RX overflow and hardware error counters;
-- preserving a similar Service API to the polling example.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Runtime flow](#runtime-flow)
+- [Register-level mechanism](#register-level-mechanism)
+- [Initialization and failure propagation](#initialization-and-failure-propagation)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Observability and debugging](#observability-and-debugging)
+- [Design trade-offs and limitations](#design-trade-offs-and-limitations)
+- [Build and run](#build-and-run)
+- [References](#references)
 
-## 2. Wiring
+## Purpose and expected behavior
 
-Same as Example 03:
+This example is stage 04 of the repository's progressive register-level series. It keeps the same self-managed startup, linker, layer checker, RCC fallback policy, system composition root, and super-loop used by the other projects, then changes the peripheral/dataflow problem under study.
 
-```text
-PA9  USART1_TX  ---> USB-UART RX
-PA10 USART1_RX  <--- USB-UART TX
-GND              --- common ground
-```
+USART1 interrupt-driven RX/TX with two power-of-two static ring buffers, explicit ISR/thread producer-consumer ownership, overflow/error telemetry, and TXE interrupt gating.
 
-Terminal:
+The important learning objective is not only “make the peripheral work.” The example is structured so that register knowledge remains concentrated in MCAL/platform code while Application expresses the observable behavior. Read the implementation from `system_init.c` downward and then compare the ownership discussion in [docs/architecture.md](docs/architecture.md).
 
-```text
-115200 8N1
-```
-
-## 3. Compile-Time Configuration
-
-```c
-#define BOARD_UART_BAUD_RATE     (115200UL)
-
-#define MCAL_USART_RX_BUFFER_SIZE (128UL)
-#define MCAL_USART_TX_BUFFER_SIZE (128UL)
-#define MCAL_USART1_IRQ_PRIORITY  (2UL)
-```
-
-Both buffer sizes must be powers of two and at least two.
-
-## 4. Ring-Buffer Model
-
-The MCAL owns static rings.
-
-### RX Ring
+## Hardware and wiring
 
 ```text
-producer: USART1 ISR
-consumer: thread mode
+Blue Pill              USB-UART (3.3 V logic)
+------------------------------------------------
+PA9  / USART1_TX  ---> RX
+PA10 / USART1_RX  <--- TX
+GND                --- GND
+
+terminal: 115200 8N1
 ```
 
-### TX Ring
+The expected board is an STM32F103C8T6 Blue Pill using 3.3 V logic. ST-Link SWD uses PA13/PA14 plus ground/reference. Do not apply 5 V logic directly to a peripheral pin merely because a USB adapter or module is powered from 5 V; verify the actual interface circuitry.
+
+## Configuration
+
+| Setting | Value |
+|---|---:|
+| USART | USART1, PA9/PA10 |
+| baud | 115200 |
+| RX ring storage | 128 bytes |
+| TX ring storage | 128 bytes |
+| usable capacity | 127 bytes each |
+| USART1 IRQ priority | 2 |
+| greeting | `STM32F103 UART interrupt ring buffer ready\r\n` |
+
+Configuration is deliberately split by ownership:
+
+- `config/board_config.h` describes board/peripheral timing and physical integration policy;
+- `config/mcal_config.h` contains MCU-driver limits such as timeout counts, buffer sizes, or IRQ priority when appropriate;
+- `config/service_config.h` contains service-level capacity/policy;
+- `config/application_config.h` contains product/demo behavior.
+
+Compile-time checks reject several invalid combinations before register programming begins. These guards are part of the example contract and should be updated together with a port, not bypassed casually.
+
+## Runtime flow
+
+```mermaid
+sequenceDiagram
+    participant HW as USART1 hardware
+    participant ISR as USART1_IRQHandler
+    participant RX as RX ring
+    participant APP as thread mode
+    participant TX as TX ring
+    HW->>ISR: RXNE / error / TXE interrupt
+    ISR->>RX: push received byte if space
+    APP->>RX: pop byte
+    APP->>TX: enqueue echo/greeting byte
+    APP->>ISR: enable TXEIE as part of enqueue critical section
+    ISR->>TX: pop next transmit byte
+    ISR->>HW: write DR
+    ISR->>ISR: disable TXEIE when TX ring becomes empty
+```
+
+The common boot path is still:
 
 ```text
-producer: thread mode
-consumer: USART1 ISR
+Reset_Handler
+    -> runtime_init()
+        -> copy .data
+        -> zero .bss
+        -> main()
+            -> IRQ disabled
+            -> system_init()
+            -> IRQ enabled only after success
+            -> application_process() forever
 ```
 
-This is a classic single-producer/single-consumer design.
+Concrete examples use `cortex_m3_nop()` in `system_idle()` so the core remains running between super-loop iterations, which is convenient for the repository's expected ST-Link/debug setup.
 
-## 5. Empty and Full
+## Register-level mechanism
 
-The implementation uses head/tail indices and power-of-two masking.
+### Ring representation
 
-Usable capacity is one element less than the storage size when the design uses
-head/tail equality for empty/full distinction.
+The MCAL uses static RX and TX arrays with 16-bit head/tail indices. Configuration requires each ring size to be a power of two, at least 2, and no larger than 32768. A one-slot-empty scheme distinguishes full from empty, therefore a configured size of 128 provides 127 bytes of usable payload capacity. Power-of-two sizing allows wrap through a mask rather than an expensive general modulo operation.
 
-The exact implementation is documented in MCAL source.
+### RX ownership
 
-## 6. Initialization Flow
+The USART ISR is the only RX-head writer; thread mode is the only RX-tail writer. On RXNE, after the SR/DR error-clearing sequence, a valid byte is written at head if the next head would not collide with tail. On full, the newest hardware byte is dropped and an overflow counter increments; unread older bytes remain intact.
+
+### TX ownership and the TXEIE race
+
+Thread mode is the TX-head producer and ISR is the TX-tail consumer. A subtle race exists when the queue is empty: the ISR may conclude there is no work and clear TXEIE at the same moment thread mode enqueues a byte. If enqueue and interrupt enable were separate, a byte could remain stranded in the queue. `mcal_usart_try_write_byte()` therefore saves PRIMASK, disables interrupts, checks/updates the ring, enables TXEIE, then restores the previous PRIMASK state.
+
+The ISR disables TXEIE again when there is no queued byte, preventing a permanent interrupt storm on the level-like TXE condition.
+
+### Error and overflow accounting
+
+Hardware PE/FE/NE/ORE flags are translated into portable error flags. Error/overflow take-and-clear operations use a short critical section because ISR updates and thread clearing must not race.
+
+### Register ownership boundary
+
+The device model under `platform/device/stm32f103xb/` contains only the register structs, memory addresses, bit masks, and IRQ identities required by the example. MCAL performs reads/writes on that model. BSP binds MCAL capabilities to Blue Pill resources. ECUAL, where present, implements external-device protocol. Services and Application do not include raw STM32 register headers.
+
+This is a deliberate compromise between two bad extremes: hiding all registers behind a vendor framework, and scattering register writes throughout application code.
+
+## Initialization and failure propagation
+
+`system/system_init.c` is the composition root. Initialization is bottom-up: the board first establishes clocks/pins/peripherals, then services/ECUAL capabilities are initialized, then Application state is created. Any required lower-layer initialization returning false prevents the normal loop from starting.
+
+Because `main()` disables interrupts before calling `system_init()`, an interrupt configured during board initialization does not execute until the entire initialization sequence succeeds and `main()` executes `cortex_m3_enable_irq()`. Code that needs a startup delay before that point must therefore use a mechanism independent of an interrupt tick unless it explicitly changes the contract.
+
+Initialization failure is fail-closed: `main()` calls `system_panic()`, which disables interrupts and remains in a NOP loop. This is intentionally simple and debugger-visible; it is not a production recovery manager.
+
+## Concurrency and ownership
+
+This example is the repository's clearest SPSC demonstration. RX and TX deliberately split index ownership instead of placing a mutex around every ring operation. The implementation assumes the Cortex-M3 interrupt/thread execution model, aligned atomic index accesses, and volatile accesses to shared state. The short explicit critical sections are reserved for state that violates pure SPSC ownership: TXEIE enable coordination and take-and-clear counters.
+
+For a deeper resource-by-resource ownership analysis, see [docs/architecture.md](docs/architecture.md).
+
+## Observability and debugging
+
+The project favors state that can be inspected directly in GDB without requiring a logging stack. Application-level `volatile` counters/status variables are used in examples where runtime observation is useful. The generated ELF also retains `-g3` debug information and the build emits a linker map and mixed source/disassembly listing.
+
+Typical debug path:
 
 ```text
-board_init()
+ST-Link / SWD
     |
-    +--> RCC clock/fallback
-    +--> board_uart_init(PCLK2)
-            |
-            +--> PA9/PA10
-            +--> MCAL USART1 init
-                    |
-                    +--> BRR
-                    +--> RX/TX rings
-                    +--> NVIC
-                    +--> RXNE/error IRQ enable
+OpenOCD :3333
+    |
+GDB
+    |
+reset halt -> load -> break main -> continue
 ```
 
-TXE interrupt remains disabled until transmit data is queued.
+When debugging a peripheral, inspect from the architecture boundary outward:
 
-## 7. RX Interrupt Path
+1. active system/bus clock;
+2. GPIO mode and peripheral clock enable;
+3. peripheral configuration registers;
+4. status/error flags;
+5. MCAL state/counters;
+6. service/Application state.
 
-```text
-RXNE/error interrupt
-    |
-USART1_IRQHandler
-    |
-read SR/DR
-    |
-hardware error?
-    |
-update counter
-    |
-push byte to RX ring
-    |
-ring full?
-    |
-increment overflow counter
-```
+This avoids treating an Application symptom as proof of an Application bug.
 
-Thread mode later pops RX bytes.
+## Design trade-offs and limitations
 
-## 8. TX Interrupt Path
+- Full RX ring drops the newest byte and only records a count; no flow control is implemented.
+- Rings are byte streams; there is no packet/message framing.
+- One-slot-empty design sacrifices one entry to avoid a separate count/full flag.
+- No DMA or hardware RTS/CTS is used.
+- Application still retains a one-byte pending echo when TX ring is full, although RX can continue accumulating independently.
 
-Thread mode:
+These limitations are intentional study boundaries rather than hidden production claims. The example should be extended only after its current ownership and timing contracts are understood.
 
-```text
-queue byte to TX ring
-    |
-enable TXE interrupt
-```
+## Build and run
 
-ISR:
-
-```text
-TXE active?
-    |
-pop byte
-    |
-    +--> byte -> write DR
-    +--> empty -> disable TXE interrupt
-```
-
-Disabling TXE interrupt when empty prevents repeated useless interrupts.
-
-## 9. Thread-Mode Write and TX-Start Race
-
-The enqueue and TXE-enable sequence must not lose the transition from "no TX
-work" to "TX work pending."
-
-The MCAL uses a short PRIMASK-protected critical section around the
-enqueue/interrupt-enable operation.
-
-It does not keep interrupts disabled during actual UART transmission.
-
-## 10. Thread-Mode Read
-
-Thread mode reads only from the RX ring.
-
-The ISR writes only to the RX ring.
-
-This producer/consumer ownership avoids a general lock around every byte.
-
-## 11. RX Overflow Semantics
-
-If the RX ring is full when a new byte arrives:
-
-```text
-new byte cannot be stored
-overflow counter increments
-```
-
-The overflow is observable through debug/state APIs.
-
-No heap expansion is attempted.
-
-## 12. Hardware Error Flags
-
-MCAL tracks receive errors such as:
-
-```text
-PE
-FE
-NE
-ORE
-```
-
-These are hardware-level errors and are distinct from software ring overflow.
-
-## 13. Application Behavior
-
-The Application sends:
-
-```text
-STM32F103 UART interrupt ring buffer ready
-```
-
-and then echoes bytes.
-
-Because the UART rings absorb asynchronous byte movement, Application does not
-need to poll hardware flags.
-
-## 14. Debug Symbols
-
-Useful state includes MCAL counters and ring indices.
-
-Look for:
-
-```text
-RX overflow count
-RX error count
-RX head/tail
-TX head/tail
-Application echo pending state
-```
-
-Use GDB with symbols from the ELF.
-
-## 15. Interrupt Ownership
-
-`USART1_IRQHandler()` belongs to MCAL USART.
-
-It performs:
-
-- flag/error handling;
-- RX ring push;
-- TX ring pop;
-- TXEIE enable/disable support.
-
-It does not call Service/Application.
-
-## 16. Architecture
-
-```text
-Application
-    |
-UART Service
-    |
-Board UART
-    |
-MCAL USART
-    |
-RX/TX rings + NVIC + USART registers
-```
-
-## 17. Comparison with Example 03
-
-Example 03:
-
-```text
-thread -> poll RXNE/TXE
-```
-
-Example 04:
-
-```text
-ISR <-> rings <-> thread
-```
-
-The upper-level UART concept stays non-blocking.
-
-## 18. Idle Behavior
-
-`system_idle()` uses `NOP`.
-
-UART interrupts can preempt thread mode whenever RX/TX hardware requires
-service.
-
-## Build, Flash, and Debug
+From this example directory:
 
 ```bash
 make check-layers
-make clean
 make
+make size
 make flash
 ```
 
-```bash
-# Terminal 1
-make debug-server
+Debug with:
 
-# Terminal 2
+```bash
+make debug-server
+# second terminal
 make debug
 ```
 
-## 19. Stress Test
+The Makefile builds freestanding Cortex-M3 Thumb code, links with the project linker script and `libgcc`, and emits ELF/BIN/HEX/LST/map artifacts. `make` runs the layer checker before compilation.
 
-1. Verify greeting.
-2. Type single characters.
-3. Paste a long burst.
-4. Inspect RX overflow counter.
-5. Halt the CPU briefly while the host continues sending.
-6. Resume and observe diagnostics.
-7. Verify TXE interrupt disables when TX ring becomes empty.
+## References
 
-## 20. Troubleshooting
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-### No Greeting
+---
 
-Check TX ring enqueue, TXE interrupt enable, NVIC, handler ownership, and PA9.
-
-### Greeting Stops After the First Byte
-
-Check TXE interrupt lifecycle and whether the handler writes subsequent bytes.
-
-### RX Overflow Increases
-
-The consumer is not keeping up with the producer.
-
-Increase buffer size or reduce/shape input rate if required.
-
-### Hardware Overrun Increases
-
-Check baud mismatch, long interrupt masking, ISR priority, and host send rate.
-
-## 21. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← 03 UART polling](../03-uart-polling/README.md) · [↑ Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md) · [05 Timer PWM →](../05-timer-pwm/README.md)

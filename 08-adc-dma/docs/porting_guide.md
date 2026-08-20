@@ -1,116 +1,123 @@
-# Porting Guide — 08-adc-dma
+# 08 ADC DMA - Porting Guide
 
-## 1. Changing ADC Input Pin/Channel
+> **Purpose:** identify which assumptions in `08-adc-dma` are board-specific, STM32F103-specific, Cortex-M3-specific, or application policy before changing hardware.
 
-Update both BSP pin mapping and ADC channel number.
+[← Architecture](architecture.md) · [Example README](../README.md) · [Examples index](../../README.md) · [Root](../../../README.md)
 
-Verify the selected STM32 pin actually maps to that ADC channel.
+## Table of contents
 
-## 2. Changing Sample Rate
+- [Porting model](#porting-model)
+- [Porting checklist](#porting-checklist)
+- [Clock and timing verification](#clock-and-timing-verification)
+- [Register-level verification](#register-level-verification)
+- [Concurrency verification](#concurrency-verification)
+- [Validation order](#validation-order)
+- [References](#references)
 
-Change:
+## Porting model
 
-```c
-BOARD_ADC_SAMPLE_RATE_HZ
-```
-
-Verify timer divisibility and that ADC conversion time can complete before the
-next trigger.
-
-## 3. Changing the Timer Trigger
-
-Verify the selected timer/TRGO source is supported by the STM32F103 ADC external
-trigger selection.
-
-Update MCAL trigger selection and BSP composition.
-
-## 4. Changing DMA Buffer Size
-
-Requirements:
+Do not start a port by editing random numeric register constants until the code builds. Classify the change first:
 
 ```text
->= 2
-even
-fits DMA CNDTR
+Application policy change
+        |
+Board-only change --------> BSP / config
+        |
+Same STM32F103 peripheral -> mostly BSP/config, verify MCAL assumptions
+        |
+Different STM32F1 part ---> device map/IRQ/pins/Flash-RAM geometry + MCAL review
+        |
+Different MCU family -----> platform/device + MCAL register sequences + startup/linker
+        |
+Different CPU arch -------> platform/arch + startup/exception model + atomicity review
 ```
 
-Block size remains half the circular buffer unless the design is changed.
+A clean port preserves the dependency direction. If Application begins including a device header “just for one pin,” the port has bypassed the architectural boundary rather than completed it.
 
-Recalculate block period and SRAM use.
+## Porting checklist
 
-## 5. Changing DMA Channel
+| Porting concern | What must be changed or re-verified |
+|---|---|
+| ADC channel/pin | GPIO analog mode, channel number, sample time |
+| trigger timer | APB timer clock, TRGO selection, PSC/ARR range |
+| DMA mapping | ADC-to-DMA channel mapping, IRQ number, register layout |
+| ADC clock | target max ADCCLK and available prescaler encodings |
+| reference voltage | actual VDDA/reference source and conversion/calibration model |
+| buffer rate | block size vs ISR rate, processing budget, acceptable overrun semantics |
+| synchronization | atomicity/critical-section strategy on a different CPU/RTOS environment |
 
-ADC1-to-DMA channel mapping is fixed by the MCU.
+Also re-run `python3 tools/scripts/check_layers.py` after structural changes.
 
-Do not choose a DMA channel arbitrarily.
+## Clock and timing verification
 
-## 6. Changing the ADC Clock Limit
+The repository attempts 8 MHz HSE -> 72 MHz PLL and falls back to 8 MHz HSI. A port must decide whether that policy is still valid. Verify:
 
-The project target limit is 12 MHz, below the STM32F103 absolute maximum used
-by the compile-time guard.
+1. oscillator source/frequency and legal PLL multiplication;
+2. Flash latency/prefetch requirements at the target clock;
+3. APB1 maximum and prescaler;
+4. which bus supplies the peripheral;
+5. the STM32F1 timer x2 rule when an APB prescaler is not 1;
+6. integer/divider limits used by the specific MCAL;
+7. timeout-loop meaning at the new CPU clock.
 
-If changing this policy, verify datasheet timing and selected prescaler.
+Never preserve a peripheral divider merely because the old board also “ran at 72 MHz.” Derive the clock at the peripheral input and compare it against the target reference manual.
 
-## 7. Changing Reference Voltage
+## Register-level verification
 
-Change `BOARD_ADC_REFERENCE_MV` only if the assumption is appropriate.
+The minimal device model is part of the port. For every newly required register:
 
-For accurate measurements, measure/calibrate VDDA instead.
+1. find the peripheral base address and register offset in the reference manual/datasheet;
+2. add or extend the `volatile` register structure without disturbing existing offsets;
+3. mark read-only fields `volatile const` where the implementation treats them as read-only;
+4. define named masks/encodings in `stm32f103xb_register_bits.h` rather than using unexplained literals in MCAL;
+5. verify reset state and flag-clear semantics;
+6. verify RCC enable/reset bits;
+7. verify GPIO mode/remap requirements;
+8. verify IRQ number and implemented priority bits if interrupts are involved.
 
-## 8. Multi-Channel ADC
+When moving to a different MCU family, prefer creating a new device directory rather than mutating `stm32f103xb` until it no longer describes STM32F103.
 
-Add sequence ranks and scan support.
+## Concurrency verification
 
-Define clearly how interleaved samples map to channels before changing the
-Service.
+This example has three execution agents: TIM3 generates trigger events in hardware, DMA writes memory autonomously, and the CPU alternates between DMA ISR and thread mode. Correctness depends on ownership of *which half is stable*. Copying a completed half in ISR prevents DMA from later rewriting the source while the service analyzes it. The design pays ISR-copy cost to avoid a more complex zero-copy buffer-state protocol.
 
-## 9. Changing IRQ Priority
+On a port, re-check every assumption about:
 
-Review all system interrupts.
+- access width and alignment of shared variables;
+- interrupt priority/preemption;
+- whether an ISR and thread have single-writer ownership;
+- whether PRIMASK is still the desired critical-section mechanism;
+- whether DMA or peripheral hardware can overwrite memory while thread mode reads it;
+- whether a blocking/polling transaction still fits the cooperative-loop latency budget.
 
-DMA service latency must remain short enough to prevent published-block
-overruns.
+A compiler-clean port is not proof of a correct handoff protocol.
 
-## 10. Refactoring ISR Ownership
+## Validation order
 
-If DMA becomes a reusable subsystem, the handler may move to a lower generic
-owner.
-
-Preserve the rule that the strong handler belongs to the lowest module owning
-DMA1 Channel 1.
-
-## 11. Validation with an Oscilloscope/Debug Pin
-
-A spare debug pin can be toggled on block publication to measure cadence.
-
-At 1 kHz sampling and 32-sample blocks:
+Recommended validation sequence:
 
 ```text
-block cadence ~= 32 ms
+1. source layer check
+2. compile + link + inspect map/size
+3. inspect generated disassembly around startup/ISR/critical paths
+4. OpenOCD connect + reset/halt
+5. verify clocks and GPIO modes in debugger
+6. validate the peripheral with a scope/logic analyzer/terminal as appropriate
+7. inject error/timeout/full-buffer conditions
+8. verify Application-observable counters/state
 ```
 
-## 12. Validation Checklist
+If the target is still STM32F103C8T6 but only wiring changed, most failures should be diagnosable at BSP/config first. If the MCU changes, verify the platform/device model before debugging higher layers.
 
--  pin/channel mapping correct;
--  ADC clock within limit;
--  calibration completes;
--  TIM3 trigger rate correct;
--  DMA1 CH1 active;
--  HT/TC events alternate;
--  sequence increments;
--  error count zero;
--  overrun zero at normal load;
--  raw values follow voltage;
--  hysteresis works.
+## References
 
-## 13. Common Pitfalls
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-- GPIO not in analog mode;
-- wrong ADC channel;
-- ADC clock too fast;
-- wrong external trigger selection;
-- wrong DMA channel;
-- circular mode missing;
-- statistics inside ISR;
-- critical section too long;
-- assuming VDDA is exactly 3.300 V.
+---
+
+[← Architecture](architecture.md) · [↑ Example README](../README.md) · [Project template →](../../../template/README.md)

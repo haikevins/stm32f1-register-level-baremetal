@@ -1,166 +1,168 @@
-# Architecture — 01-blink-led
+# 01 Blink LED - Architecture
 
-## 1. Dependency Graph
+> **Focus:** ownership, dependency direction, initialization ordering, execution contexts, data lifetime, and failure invariants for `01-blink-led`.
 
-```text
-Application
-    |
-    +--> Time Service ------> Board Timebase -----> MCAL SysTick
-    |
-    +--> Indication Service -> Board LED ---------> MCAL GPIO
-                                                      |
-                                                      v
-                                               Platform Device
+[← Example README](../README.md) · [Porting guide →](porting_guide.md) · [Examples index](../../README.md) · [Root](../../../README.md)
+
+## Table of contents
+
+- [Architectural slice](#architectural-slice)
+- [Composition and initialization](#composition-and-initialization)
+- [Source map and exact composition](#source-map-and-exact-composition)
+- [Resource ownership](#resource-ownership)
+- [Data and control flow](#data-and-control-flow)
+- [Concurrency model](#concurrency-model)
+- [Failure model](#failure-model)
+- [Invariants](#invariants)
+- [Why this structure matters](#why-this-structure-matters)
+- [References](#references)
+
+## Architectural slice
+
+The example uses the repository's full dependency vocabulary even when some directories are intentionally thin:
+
+```mermaid
+flowchart TD
+    APP["app: demo/product policy"] --> SVC["services: logical capability"]
+    SVC --> BSP["bsp/bluepill: physical resource binding"]
+    SVC --> ECUAL["ecual: external component protocol when used"]
+    BSP --> MCAL["mcal: generic STM32 peripheral behavior"]
+    ECUAL --> MCAL
+    MCAL --> DEV["platform/device: memory map + register fields"]
+    MCAL --> ARCH["platform/arch: Cortex-M3 core operations"]
+    SYS["system: composition root"] -. constructs .-> BSP
+    SYS -. constructs .-> SVC
+    SYS -. constructs .-> APP
 ```
 
-## 2. Layer Responsibilities
+`check_layers.py` mechanically checks local include direction. `system` is intentionally exempt from normal downward-only restrictions because it is the composition root that wires otherwise separated modules together.
 
-Application owns the 500 ms blink policy.
+The architecture is **procedural and statically composed**. There is no dependency-injection framework, heap, object registry, or RTOS task container. Dependencies are expressed through C calls and, for ECUAL transports, small function-pointer interfaces.
 
-Time Service owns millisecond semantics.
+## Composition and initialization
 
-Indication Service owns the logical indicator API.
-
-Board Timebase maps the logical timebase to SysTick.
-
-Board LED maps the logical indicator to PC13 and active-low polarity.
-
-MCAL owns register-level peripheral behavior.
-
-Platform owns the STM32/Cortex-M register model.
-
-## 3. Initialization Dependency
+The reset path establishes C runtime memory before any module initialization:
 
 ```text
-RCC clock
-    |
-Board LED + Board Timebase
-    |
-Services
-    |
-Application
+vector table -> Reset_Handler -> runtime_init
+                              -> .data copy
+                              -> .bss clear
+                              -> main
 ```
 
-Application is initialized only after all required hardware resources are valid.
+`main()` disables global interrupts, calls `system_init()`, enables them only on success, then repeatedly executes Application and idle. This provides a strong initialization boundary: no normal IRQ should observe partially initialized service/Application state.
 
-## 4. Runtime Data Flow
+For this example, the exact resource behavior is summarized in its [README](../README.md). The important architectural question is the order implied by `system_init.c`: lower-level board/peripheral invariants are established before a service exposes them, and service state exists before Application starts using it.
 
-### Time Path
+## Source map and exact composition
+
+### Exact composition
 
 ```text
-SysTick interrupt
-    |
-MCAL tick counter
-    |
-Board Timebase
-    |
-Time Service
-    |
-Application periodic check
+system_init
+  -> board_init
+       -> RCC HSE/PLL attempt or HSI fallback
+       -> board_led_init -> GPIOC/PC13
+       -> board_timebase_init -> SysTick from active SYSCLK
+  -> time_service_init
+  -> indication_service_init
+  -> event_service_init
+  -> application_init
 ```
 
-### LED Path
+The active source files on the feature path are `application.c`, `time_service.c`, `indication_service.c`, `board_led.c`, `board_timebase.c`, `mcal_gpio.c`, `mcal_systick.c`, and `mcal_rcc.c`. `event_service.c` is constructed but not used by the blink control path. This distinction is important when measuring true runtime dependencies.
+
+## Resource ownership
+
+A resource is considered owned by the lowest layer that must know its implementation detail:
+
+| Concern | Owner | Reason |
+|---|---|---|
+| Application behavior/state | `app` | defines what the demo/product does |
+| Logical capability/state | `services` | hides board/peripheral representation |
+| Blue Pill pins and peripheral instance | `bsp/bluepill` | board-specific mapping |
+| External IC command protocol | `ecual` when present | reusable independently of MCU bus instance |
+| STM32 peripheral register sequence | `mcal` | MCU-specific but board-independent behavior |
+| addresses/register structs/bit fields | `platform/device` | device register contract |
+| PRIMASK/NVIC/SysTick/SCB/core ops | `platform/arch` | Cortex-M3 contract |
+| startup wiring/composition/fault policy | `system` + `startup` | program construction/runtime boundary |
+
+The key consequence is that Application can be read without RM0008 open beside it. RM0008 becomes necessary when reading MCAL/platform code, exactly where the register-level knowledge is supposed to live.
+
+## Data and control flow
+
+```mermaid
+sequenceDiagram
+    participant ST as SysTick_Handler
+    participant TS as time_service
+    participant APP as application_process
+    participant LED as indication_service
+    ST->>ST: increment g_systick_ticks
+    APP->>TS: periodic_due(last, 500 ms)
+    TS-->>APP: true when elapsed >= 500 ms
+    APP->>LED: toggle logical status
+    LED->>LED: map logical state to active-low PC13
+```
+
+The diagram emphasizes behavior, but data ownership is equally important. State used only by one execution context stays private to that module. Shared ISR/thread state is either divided by producer/consumer ownership or protected with a short PRIMASK critical section. External-device payload buffers remain statically allocated and have an explicit owner during synchronous transactions.
+
+## Concurrency model
+
+Only SysTick modifies time asynchronously. Application reads the 32-bit tick counter in thread mode. On Cortex-M3 an aligned 32-bit load/store is a single architectural access; the project relies on that property for the simple monotonic tick. There is no queue between the SysTick ISR and Application and no GPIO work in the ISR.
+
+The firmware is a single-core Cortex-M3 super-loop with interrupt preemption. There are no RTOS tasks, so “thread mode” here means the code running from `main()` outside exception handlers. Concurrency therefore comes from hardware peripherals, DMA, and interrupt exceptions rather than parallel CPU threads.
+
+Critical sections save the existing PRIMASK state and restore it, rather than blindly enabling interrupts on exit. That matters because a helper can be called from a context where interrupts were already disabled.
+
+## Failure model
+
+The dominant initialization failure contract is boolean/status propagation upward:
 
 ```text
-Application
-    |
-Indication Service
-    |
-Board LED
-    |
-MCAL GPIO
-    |
-PC13
+MCAL/BSP/ECUAL initialization failure
+              |
+              v
+       system_init() == false
+              |
+              v
+        system_panic()
 ```
 
-## 5. Register Ownership
+Runtime failures that the example intentionally tolerates are represented in module/Application state rather than necessarily panicking. The README documents the exact distinction for this example. No exception handler attempts dynamic recovery; core faults converge on panic for deterministic debug behavior.
 
-Only MCAL/Platform code knows:
+Timeouts are bounded loops rather than scheduler-based deadlines in lower-level startup-sensitive paths. This keeps initialization independent of interrupts, but a “poll count” should not be mistaken for a portable wall-clock duration.
 
-```text
-RCC APB2 enable bits
-GPIO CRH fields
-GPIO BSRR/BRR
-SysTick CTRL/LOAD/VAL
-```
+## Invariants
 
-Application and Services never access those registers.
+1. PC13 polarity is a BSP concern; Application never compensates for active-low wiring.
+2. SysTick ISR only owns `g_systick_ticks`; it does not call services or Application.
+3. `system_init()` must establish board timebase before `time_service_init()`/Application uses it.
+4. A failed clock/timebase/board initialization prevents global IRQ enable and enters panic.
+5. The event queue may be removed without changing current blink behavior because no active path depends on it.
 
-## 6. ISR Ownership
+These invariants are more useful than memorizing call order. If a future change violates one, the design has changed and documentation/tests should be updated intentionally.
 
-`SysTick_Handler()` belongs to MCAL SysTick because MCAL owns the core
-timebase peripheral.
+## Why this structure matters
 
-The ISR performs one bounded action:
+A register-level project can easily become unmaintainable if every layer knows every bit field. This repository instead uses direct register access to make the hardware mechanism visible **and** a dependency boundary to keep that mechanism local.
 
-```text
-tick_count++
-```
+That yields three practical learning benefits:
 
-## 7. Concurrency
+1. You can trace a high-level request down to the exact register writes.
+2. You can change hardware binding without rewriting Application policy.
+3. You can reason about ISR/shared-state ownership because there are few legal places where the same resource may be touched.
 
-The tick counter is written in ISR context and read in thread mode.
+The cost is more source files and explicit interfaces than a single-file tutorial. That cost is deliberate: the project is practicing firmware architecture at the same time as register programming.
 
-The project uses a 32-bit counter and unsigned subtraction for wraparound-safe
-elapsed-time calculations.
+## References
 
-No blocking synchronization is required for this simple one-writer/read-only
-pattern.
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-## 8. HSE Fallback
+---
 
-Board initialization tries HSE+PLL first.
-
-If that path fails:
-
-```text
-HSI 8 MHz
-```
-
-is selected.
-
-The Board Timebase receives the actual system clock, so SysTick remains 1 kHz
-under either clock source.
-
-## 9. Why Application Does Not Use a Busy Delay
-
-A 500 ms busy delay would prevent the super-loop from performing other work.
-
-The timestamp design instead performs:
-
-```text
-check -> not due -> return
-```
-
-This is the scheduling model reused by later examples.
-
-## 10. Current Event Service
-
-No general event queue is needed in Example 01.
-
-Adding an event framework would increase complexity without solving a current
-requirement.
-
-## 11. Failure Path
-
-If board initialization fails:
-
-```text
-board_init() -> false
-system_init() -> false
-system_panic()
-```
-
-The Application never runs with an invalid timebase.
-
-## 12. Extension Boundaries
-
-Good extension points:
-
-- blink policy -> Application;
-- logical indicator behavior -> Service;
-- pin/polarity -> BSP;
-- GPIO/SysTick implementation -> MCAL;
-- register definitions -> Platform.
-
-Keep those boundaries intact.
+[← Example README](../README.md) · [↑ Examples](../../README.md) · [Porting guide →](porting_guide.md)

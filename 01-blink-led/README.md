@@ -1,275 +1,194 @@
-# 01-blink-led — GPIO Output + SysTick + Non-Blocking Super-Loop
+# 01 - Blink LED - GPIO Output and SysTick
 
-## 1. Learning Objectives
+> **Scope:** PC13 active-low output, RCC/GPIO configuration, a 1 kHz SysTick timebase, and non-blocking periodic application scheduling.
 
-This first example introduces the architecture used throughout the repository.
+[Root](../../README.md) · [Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn how to:
+## Table of contents
 
-- configure the Blue Pill onboard LED through register-level MCAL;
-- hide active-low electrical behavior behind a logical Service;
-- build a 1 ms SysTick timebase;
-- schedule periodic work without a blocking delay;
-- handle 72 MHz HSE/PLL startup with 8 MHz HSI fallback;
-- keep Application independent from GPIO and SysTick registers.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Runtime flow](#runtime-flow)
+- [Register-level mechanism](#register-level-mechanism)
+- [Initialization and failure propagation](#initialization-and-failure-propagation)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Observability and debugging](#observability-and-debugging)
+- [Design trade-offs and limitations](#design-trade-offs-and-limitations)
+- [Build and run](#build-and-run)
+- [References](#references)
 
-## 2. Expected Result
+## Purpose and expected behavior
 
-The onboard PC13 LED changes state every 500 ms.
+This example is stage 01 of the repository's progressive register-level series. It keeps the same self-managed startup, linker, layer checker, RCC fallback policy, system composition root, and super-loop used by the other projects, then changes the peripheral/dataflow problem under study.
 
-Because the LED is active-low:
+PC13 active-low output, RCC/GPIO configuration, a 1 kHz SysTick timebase, and non-blocking periodic application scheduling.
 
-```text
-PC13 LOW  -> LED ON
-PC13 HIGH -> LED OFF
-```
+The important learning objective is not only “make the peripheral work.” The example is structured so that register knowledge remains concentrated in MCAL/platform code while Application expresses the observable behavior. Read the implementation from `system_init.c` downward and then compare the ownership discussion in [docs/architecture.md](docs/architecture.md).
 
-One complete ON/OFF cycle takes about one second.
-
-## 3. Hardware
-
-No external components are required.
+## Hardware and wiring
 
 ```text
-Blue Pill onboard LED -> PC13
+Blue Pill PC13 onboard LED
+
+logical ON  -> PC13 driven LOW
+logical OFF -> PC13 driven HIGH
 ```
 
-Board configuration:
+The expected board is an STM32F103C8T6 Blue Pill using 3.3 V logic. ST-Link SWD uses PA13/PA14 plus ground/reference. Do not apply 5 V logic directly to a peripheral pin merely because a USB adapter or module is powered from 5 V; verify the actual interface circuitry.
 
-```c
-#define BOARD_STATUS_LED_PORT         MCAL_GPIO_PORT_C
-#define BOARD_STATUS_LED_PIN          (13U)
-#define BOARD_STATUS_LED_ACTIVE_LEVEL MCAL_GPIO_LEVEL_LOW
+## Configuration
+
+| Setting | Value | Ownership |
+|---|---:|---|
+| `BOARD_HSE_FREQUENCY_HZ` | 8 MHz | board |
+| `BOARD_TARGET_CLOCK_HZ` | 72 MHz | board |
+| `BOARD_TIMEBASE_HZ` | 1000 Hz | board |
+| `APPLICATION_BLINK_PERIOD_MS` | 500 ms | application |
+| `SERVICE_EVENT_QUEUE_CAPACITY` | 16 | service scaffold |
+
+Configuration is deliberately split by ownership:
+
+- `config/board_config.h` describes board/peripheral timing and physical integration policy;
+- `config/mcal_config.h` contains MCU-driver limits such as timeout counts, buffer sizes, or IRQ priority when appropriate;
+- `config/service_config.h` contains service-level capacity/policy;
+- `config/application_config.h` contains product/demo behavior.
+
+Compile-time checks reject several invalid combinations before register programming begins. These guards are part of the example contract and should be updated together with a port, not bypassed casually.
+
+## Runtime flow
+
+```mermaid
+sequenceDiagram
+    participant ST as SysTick_Handler
+    participant TS as time_service
+    participant APP as application_process
+    participant LED as indication_service
+    ST->>ST: increment g_systick_ticks
+    APP->>TS: periodic_due(last, 500 ms)
+    TS-->>APP: true when elapsed >= 500 ms
+    APP->>LED: toggle logical status
+    LED->>LED: map logical state to active-low PC13
 ```
 
-## 4. Compile-Time Configuration
-
-```c
-#define BOARD_HSE_FREQUENCY_HZ (8000000UL)
-#define BOARD_TARGET_CLOCK_HZ   (72000000UL)
-#define BOARD_TIMEBASE_HZ       (1000UL)
-
-#define APPLICATION_BLINK_PERIOD_MS (500UL)
-```
-
-The example requires a 1 kHz board timebase so one tick equals one millisecond.
-
-## 5. Startup Flow
+The common boot path is still:
 
 ```text
 Reset_Handler
-    |
-main()
-    |
-disable global IRQ
-    |
-system_init()
-    |
-    +--> board_init()
-    |      +--> try HSE + PLL -> 72 MHz
-    |      +--> fallback to HSI 8 MHz on failure
-    |      +--> board_led_init()
-    |      +--> board_timebase_init(actual SYSCLK)
-    |
-    +--> time_service_init()
-    +--> indication_service_init()
-    +--> application_init()
-    |
-enable global IRQ
-    |
-super-loop
+    -> runtime_init()
+        -> copy .data
+        -> zero .bss
+        -> main()
+            -> IRQ disabled
+            -> system_init()
+            -> IRQ enabled only after success
+            -> application_process() forever
 ```
 
-The global IRQ lifecycle is explicit: SysTick cannot increment until
-`system_init()` completes and interrupts are enabled.
+Concrete examples use `cortex_m3_nop()` in `system_idle()` so the core remains running between super-loop iterations, which is convenient for the repository's expected ST-Link/debug setup.
 
-## 6. Clock Setup
+## Register-level mechanism
 
-The Board layer requests:
+### Timebase and scheduling
+
+`mcal_systick_init()` accepts the **actual** core clock and requires an integer division by the requested tick frequency. It computes `LOAD = core_clock / tick_hz - 1`, rejects values outside SysTick's 24-bit reload range, then enables core-clock source, interrupt, and counter. The ISR does exactly one operation: increment `g_systick_ticks`.
+
+`time_service_periodic_due()` compares unsigned elapsed time and, when due, sets `*last_run_ms = now_ms`. This gives wrap-safe elapsed arithmetic for periods shorter than the 32-bit wrap interval, but it is not a catch-up scheduler: if thread mode is delayed, the next phase is anchored to the late observation time. That is appropriate for a visual blink demo but should not be confused with phase-locked periodic execution.
+
+### GPIO register path
+
+The BSP declares PC13 as the status indication and marks it active-low. MCAL enables the GPIOC APB2 clock, rewrites the correct four-bit `CRH` field for pin 13, and uses `BSRR` for set/reset rather than a read-modify-write on `ODR`. The service deals only with logical ON/OFF/toggle.
+
+### Event service is not in the active path
+
+The system initializes a static event queue with capacity 16, but this example never pushes or pops an event. It is a scaffold for later event-driven work, not part of the LED timing mechanism. The documentation calls this out explicitly so the presence of the module is not mistaken for runtime use.
+
+### Register ownership boundary
+
+The device model under `platform/device/stm32f103xb/` contains only the register structs, memory addresses, bit masks, and IRQ identities required by the example. MCAL performs reads/writes on that model. BSP binds MCAL capabilities to Blue Pill resources. ECUAL, where present, implements external-device protocol. Services and Application do not include raw STM32 register headers.
+
+This is a deliberate compromise between two bad extremes: hiding all registers behind a vendor framework, and scattering register writes throughout application code.
+
+## Initialization and failure propagation
+
+`system/system_init.c` is the composition root. Initialization is bottom-up: the board first establishes clocks/pins/peripherals, then services/ECUAL capabilities are initialized, then Application state is created. Any required lower-layer initialization returning false prevents the normal loop from starting.
+
+Because `main()` disables interrupts before calling `system_init()`, an interrupt configured during board initialization does not execute until the entire initialization sequence succeeds and `main()` executes `cortex_m3_enable_irq()`. Code that needs a startup delay before that point must therefore use a mechanism independent of an interrupt tick unless it explicitly changes the contract.
+
+Initialization failure is fail-closed: `main()` calls `system_panic()`, which disables interrupts and remains in a NOP loop. This is intentionally simple and debugger-visible; it is not a production recovery manager.
+
+## Concurrency and ownership
+
+Only SysTick modifies time asynchronously. Application reads the 32-bit tick counter in thread mode. On Cortex-M3 an aligned 32-bit load/store is a single architectural access; the project relies on that property for the simple monotonic tick. There is no queue between the SysTick ISR and Application and no GPIO work in the ISR.
+
+For a deeper resource-by-resource ownership analysis, see [docs/architecture.md](docs/architecture.md).
+
+## Observability and debugging
+
+The project favors state that can be inspected directly in GDB without requiring a logging stack. Application-level `volatile` counters/status variables are used in examples where runtime observation is useful. The generated ELF also retains `-g3` debug information and the build emits a linker map and mixed source/disassembly listing.
+
+Typical debug path:
 
 ```text
-HSE = 8 MHz
-target SYSCLK = 72 MHz
-```
-
-MCAL RCC configures HSE/PLL. If the external crystal path fails, the board calls
-`mcal_rcc_use_hsi()`.
-
-The active source can be queried through `board_get_clock_source()`.
-
-All timebase configuration uses the actual clock reported by MCAL, not a
-hard-coded 72 MHz assumption.
-
-## 7. GPIO LED
-
-The BSP calls `mcal_gpio_configure()` for PC13.
-
-The active level is defined by the board:
-
-```text
-logical ON -> PC13 LOW
-logical OFF -> PC13 HIGH
-```
-
-Application never sees the pin number or active polarity.
-
-## 8. SysTick Timebase
-
-`board_timebase_init()` calls:
-
-```c
-mcal_systick_init(core_clock_hz, BOARD_TIMEBASE_HZ);
-```
-
-The MCAL programs the Cortex-M3 SysTick registers:
-
-```text
-CTRL
-LOAD
-VAL
-```
-
-and enables:
-
-```text
-CLKSOURCE
-TICKINT
-ENABLE
-```
-
-`SysTick_Handler()` increments a volatile tick counter.
-
-With a 1 kHz timebase, the Service interprets ticks directly as milliseconds.
-
-## 9. Application State
-
-The Application stores the last toggle timestamp.
-
-Every call to `application_process()` asks whether 500 ms has elapsed.
-
-```text
-period due?
+ST-Link / SWD
     |
-    +--> no  -> return
+OpenOCD :3333
     |
-    +--> yes -> toggle logical indication
+GDB
+    |
+reset halt -> load -> break main -> continue
 ```
 
-No busy delay is used.
+When debugging a peripheral, inspect from the architecture boundary outward:
 
-## 10. Architecture
+1. active system/bus clock;
+2. GPIO mode and peripheral clock enable;
+3. peripheral configuration registers;
+4. status/error flags;
+5. MCAL state/counters;
+6. service/Application state.
 
-```text
-Application
-    |
-    +--> Time Service ------> Board Timebase -----> MCAL SysTick
-    |
-    +--> Indication Service -> Board LED ---------> MCAL GPIO
-                                                       |
-                                                       v
-                                                Platform registers
-```
+This avoids treating an Application symptom as proof of an Application bug.
 
-## 11. Interrupt
+## Design trade-offs and limitations
 
-Only SysTick is active.
+- The blink scheduler re-anchors to `now_ms` after a late iteration; it does not execute missed periods.
+- Concrete examples idle with `NOP`, so the CPU remains active between iterations.
+- The event queue consumes static memory but is intentionally unused in this example.
+- No watchdog or runtime clock-failure handling is implemented after initialization.
 
-Ownership:
+These limitations are intentional study boundaries rather than hidden production claims. The example should be extended only after its current ownership and timing contracts are understood.
 
-```text
-SysTick core peripheral
-    |
-MCAL SysTick
-    |
-SysTick_Handler()
-```
+## Build and run
 
-The ISR only increments the tick counter.
-
-## 12. Idle and Panic
-
-The example uses:
-
-```c
-cortex_m3_nop();
-```
-
-for both normal idle and the panic loop.
-
-Panic disables global interrupts first.
-
-This is intentionally debug-friendly for an ST-Link connection without NRST.
-
-## 13. Recommended Reading Order
-
-1. `app/src/application.c`
-2. `services/src/time_service.c`
-3. `services/src/indication_service.c`
-4. `bsp/bluepill/src/board_led.c`
-5. `bsp/bluepill/src/board_timebase.c`
-6. `mcal/src/mcal_gpio.c`
-7. `mcal/src/mcal_systick.c`
-8. `mcal/src/mcal_rcc.c`
-9. `platform/device/stm32f103xb/include/...`
-10. `system/system_init.c`
-
-## Build, Flash, and Debug
+From this example directory:
 
 ```bash
 make check-layers
-make clean
 make
+make size
 make flash
 ```
 
-```bash
-# Terminal 1
-make debug-server
+Debug with:
 
-# Terminal 2
+```bash
+make debug-server
+# second terminal
 make debug
 ```
 
-## 14. Troubleshooting
+The Makefile builds freestanding Cortex-M3 Thumb code, links with the project linker script and `libgcc`, and emits ELF/BIN/HEX/LST/map artifacts. `make` runs the layer checker before compilation.
 
-### LED Does Not Blink
+## References
 
-Check:
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-1. `system_init()` succeeds;
-2. global IRQ is enabled after initialization;
-3. `SysTick_Handler()` is reached;
-4. the SysTick counter increases;
-5. `application_process()` runs continuously;
-6. the logical indication toggles;
-7. PC13 changes level.
+---
 
-### LED Is Always On or Always Off
-
-Check active-low handling and PC13 configuration.
-
-Do not "fix" the Application by inverting its logical state. Polarity belongs
-in BSP.
-
-### Debugger Is Difficult to Attach
-
-Check SWD wiring and confirm OpenOCD uses:
-
-```tcl
-reset_config none
-```
-
-The `NOP` idle/panic policy is intended to keep attach behavior predictable.
-
-## 15. Extension Exercises
-
-- change the blink period;
-- add asymmetric ON/OFF timing;
-- move the LED to another pin without changing Application;
-- replace SysTick with a timer-backed board timebase;
-- expose the active clock source in a debug variable.
-
-## 16. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← Examples index](../README.md) · [↑ Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md) · [02 GPIO input interrupt →](../02-gpio-input-interrupt/README.md)

@@ -1,86 +1,122 @@
-# Porting Guide — 03-uart-polling
+# 03 UART polling - Porting Guide
 
-## 1. Changing Pins While Keeping USART1
+> **Purpose:** identify which assumptions in `03-uart-polling` are board-specific, STM32F103-specific, Cortex-M3-specific, or application policy before changing hardware.
 
-On STM32F1, alternate-function remapping may be required for non-default pins.
+[← Architecture](architecture.md) · [Example README](../README.md) · [Examples index](../../README.md) · [Root](../../../README.md)
 
-Update BSP pin mapping and AFIO support if necessary.
+## Table of contents
 
-Keep Application/Service unchanged.
+- [Porting model](#porting-model)
+- [Porting checklist](#porting-checklist)
+- [Clock and timing verification](#clock-and-timing-verification)
+- [Register-level verification](#register-level-verification)
+- [Concurrency verification](#concurrency-verification)
+- [Validation order](#validation-order)
+- [References](#references)
 
-## 2. Moving to USART2/USART3
+## Porting model
 
-Update:
-
-- peripheral instance;
-- APB bus clock;
-- TX/RX pins;
-- base address/register model if not already present;
-- RCC enable bit.
-
-USART2/3 are on APB1 rather than APB2.
-
-## 3. Changing Baud Rate
-
-Change `BOARD_UART_BAUD_RATE`.
-
-MCAL should calculate BRR from the active peripheral clock.
-
-Verify the actual baud with a terminal or logic analyzer.
-
-## 4. Changing the Clock Tree
-
-Re-check:
-
-- system clock;
-- APB prescaler;
-- selected USART peripheral clock;
-- BRR formula.
-
-Do not keep a BRR value calculated for 72 MHz.
-
-## 5. Changing Data Format
-
-Extend MCAL configuration for:
-
-- parity;
-- word length;
-- stop bits.
-
-Keep those details below Application.
-
-## 6. Adding a Blocking API with Timeout
-
-If a blocking helper is required, give it an explicit finite timeout.
-
-Keep the non-blocking API available for super-loop use.
-
-## 7. Porting to Another MCU Family
-
-Preserve:
+Do not start a port by editing random numeric register constants until the code builds. Classify the change first:
 
 ```text
-Application -> UART Service -> BSP
+Application policy change
+        |
+Board-only change --------> BSP / config
+        |
+Same STM32F103 peripheral -> mostly BSP/config, verify MCAL assumptions
+        |
+Different STM32F1 part ---> device map/IRQ/pins/Flash-RAM geometry + MCAL review
+        |
+Different MCU family -----> platform/device + MCAL register sequences + startup/linker
+        |
+Different CPU arch -------> platform/arch + startup/exception model + atomicity review
 ```
 
-Replace MCAL/Platform Device and board pin mapping.
+A clean port preserves the dependency direction. If Application begins including a device header “just for one pin,” the port has bypassed the architectural boundary rather than completed it.
 
-## 8. Post-Port Test
+## Porting checklist
 
--  TX baud correct;
--  greeting readable;
--  RX works;
--  echo works;
--  HSE and fallback clock both calculate a valid baud if fallback is kept;
--  no unbounded wait;
--  layer checker passes.
+| Porting concern | What must be changed or re-verified |
+|---|---|
+| UART instance | RCC enable, base address, pins/remap, status/control bits |
+| Clock domain | PCLK feeding the selected USART and BRR formula |
+| Baud tolerance | actual clock accuracy and peer tolerance |
+| Electrical interface | 3.3 V TTL vs RS-232/RS-485 transceiver requirements |
+| Error clearing | target-specific SR/DR semantics |
+| Throughput | super-loop service latency before choosing polling |
 
-## 9. Common Pitfalls
+Also re-run `python3 tools/scripts/check_layers.py` after structural changes.
 
-- TX connected to TX;
-- no common ground;
-- wrong APB clock;
-- wrong BRR formula;
-- wrong alternate-function mapping;
-- using 5 V logic;
-- blocking forever on TXE/RXNE.
+## Clock and timing verification
+
+The repository attempts 8 MHz HSE -> 72 MHz PLL and falls back to 8 MHz HSI. A port must decide whether that policy is still valid. Verify:
+
+1. oscillator source/frequency and legal PLL multiplication;
+2. Flash latency/prefetch requirements at the target clock;
+3. APB1 maximum and prescaler;
+4. which bus supplies the peripheral;
+5. the STM32F1 timer x2 rule when an APB prescaler is not 1;
+6. integer/divider limits used by the specific MCAL;
+7. timeout-loop meaning at the new CPU clock.
+
+Never preserve a peripheral divider merely because the old board also “ran at 72 MHz.” Derive the clock at the peripheral input and compare it against the target reference manual.
+
+## Register-level verification
+
+The minimal device model is part of the port. For every newly required register:
+
+1. find the peripheral base address and register offset in the reference manual/datasheet;
+2. add or extend the `volatile` register structure without disturbing existing offsets;
+3. mark read-only fields `volatile const` where the implementation treats them as read-only;
+4. define named masks/encodings in `stm32f103xb_register_bits.h` rather than using unexplained literals in MCAL;
+5. verify reset state and flag-clear semantics;
+6. verify RCC enable/reset bits;
+7. verify GPIO mode/remap requirements;
+8. verify IRQ number and implemented priority bits if interrupts are involved.
+
+When moving to a different MCU family, prefer creating a new device directory rather than mutating `stm32f103xb` until it no longer describes STM32F103.
+
+## Concurrency verification
+
+USART work is entirely thread-mode polling. There is no USART1 IRQ, no RX/TX ring, and therefore no ISR/thread data race inside the serial path. SysTick is not part of this example. Hardware, however, continues receiving asynchronously; if thread mode does not read RXNE before another byte arrives, USART ORE can be raised and the driver reports/discards the errored receive.
+
+On a port, re-check every assumption about:
+
+- access width and alignment of shared variables;
+- interrupt priority/preemption;
+- whether an ISR and thread have single-writer ownership;
+- whether PRIMASK is still the desired critical-section mechanism;
+- whether DMA or peripheral hardware can overwrite memory while thread mode reads it;
+- whether a blocking/polling transaction still fits the cooperative-loop latency budget.
+
+A compiler-clean port is not proof of a correct handoff protocol.
+
+## Validation order
+
+Recommended validation sequence:
+
+```text
+1. source layer check
+2. compile + link + inspect map/size
+3. inspect generated disassembly around startup/ISR/critical paths
+4. OpenOCD connect + reset/halt
+5. verify clocks and GPIO modes in debugger
+6. validate the peripheral with a scope/logic analyzer/terminal as appropriate
+7. inject error/timeout/full-buffer conditions
+8. verify Application-observable counters/state
+```
+
+If the target is still STM32F103C8T6 but only wiring changed, most failures should be diagnosable at BSP/config first. If the MCU changes, verify the platform/device model before debugging higher layers.
+
+## References
+
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
+
+---
+
+[← Architecture](architecture.md) · [↑ Example README](../README.md) · [04 UART interrupt ring buffer →](../../04-uart-interrupt-ring-buffer/README.md)

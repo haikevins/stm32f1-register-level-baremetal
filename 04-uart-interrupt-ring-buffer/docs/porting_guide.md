@@ -1,97 +1,122 @@
-# Porting Guide — 04-uart-interrupt-ring-buffer
+# 04 UART IRQ ring buffer - Porting Guide
 
-## 1. Parts That Can Remain Unchanged
+> **Purpose:** identify which assumptions in `04-uart-interrupt-ring-buffer` are board-specific, STM32F103-specific, Cortex-M3-specific, or application policy before changing hardware.
 
-When changing only physical UART hardware, keep:
+[← Architecture](architecture.md) · [Example README](../README.md) · [Examples index](../../README.md) · [Root](../../../README.md)
+
+## Table of contents
+
+- [Porting model](#porting-model)
+- [Porting checklist](#porting-checklist)
+- [Clock and timing verification](#clock-and-timing-verification)
+- [Register-level verification](#register-level-verification)
+- [Concurrency verification](#concurrency-verification)
+- [Validation order](#validation-order)
+- [References](#references)
+
+## Porting model
+
+Do not start a port by editing random numeric register constants until the code builds. Classify the change first:
 
 ```text
-Application
-UART Service
-ring-buffer behavior
+Application policy change
+        |
+Board-only change --------> BSP / config
+        |
+Same STM32F103 peripheral -> mostly BSP/config, verify MCAL assumptions
+        |
+Different STM32F1 part ---> device map/IRQ/pins/Flash-RAM geometry + MCAL review
+        |
+Different MCU family -----> platform/device + MCAL register sequences + startup/linker
+        |
+Different CPU arch -------> platform/arch + startup/exception model + atomicity review
 ```
 
-Replace BSP/MCAL mapping as required.
+A clean port preserves the dependency direction. If Application begins including a device header “just for one pin,” the port has bypassed the architectural boundary rather than completed it.
 
-## 2. Changing the USART Instance
+## Porting checklist
 
-Review:
+| Porting concern | What must be changed or re-verified |
+|---|---|
+| USART/pins | base address, RCC, AF mapping/remap, IRQ number |
+| IRQ priority | target priority implementation and system-wide priority policy |
+| Ring size | power-of-two constraint, one-slot loss, RAM budget, index width |
+| Atomic assumptions | index width/alignment and interrupt preemption model |
+| Flow control | add RTS/CTS or protocol backpressure if loss is unacceptable |
+| Memory ordering | revisit assumptions when moving beyond single-core Cortex-M interrupt/thread model |
 
-- base address;
-- RCC clock bit;
-- APB clock;
-- pins;
-- IRQ number;
-- vector handler name;
-- NVIC mapping.
+Also re-run `python3 tools/scripts/check_layers.py` after structural changes.
 
-## 3. Changing Buffer Size
+## Clock and timing verification
 
-Update MCAL configuration.
+The repository attempts 8 MHz HSE -> 72 MHz PLL and falls back to 8 MHz HSI. A port must decide whether that policy is still valid. Verify:
 
-Requirements:
+1. oscillator source/frequency and legal PLL multiplication;
+2. Flash latency/prefetch requirements at the target clock;
+3. APB1 maximum and prescaler;
+4. which bus supplies the peripheral;
+5. the STM32F1 timer x2 rule when an APB prescaler is not 1;
+6. integer/divider limits used by the specific MCAL;
+7. timeout-loop meaning at the new CPU clock.
 
-- at least 2;
-- power of two;
-- compatible with index width.
+Never preserve a peripheral divider merely because the old board also “ran at 72 MHz.” Derive the clock at the peripheral input and compare it against the target reference manual.
 
-Check SRAM use.
+## Register-level verification
 
-## 4. Changing IRQ Priority
+The minimal device model is part of the port. For every newly required register:
 
-Review all interrupt priorities.
+1. find the peripheral base address and register offset in the reference manual/datasheet;
+2. add or extend the `volatile` register structure without disturbing existing offsets;
+3. mark read-only fields `volatile const` where the implementation treats them as read-only;
+4. define named masks/encodings in `stm32f103xb_register_bits.h` rather than using unexplained literals in MCAL;
+5. verify reset state and flag-clear semantics;
+6. verify RCC enable/reset bits;
+7. verify GPIO mode/remap requirements;
+8. verify IRQ number and implemented priority bits if interrupts are involved.
 
-UART priority should be sufficient to avoid overrun but the ISR must remain
-short.
+When moving to a different MCU family, prefer creating a new device directory rather than mutating `stm32f103xb` until it no longer describes STM32F103.
 
-## 5. Changing Baud/Data Format
+## Concurrency verification
 
-Extend MCAL USART setup for new baud/parity/stop/word length.
+This example is the repository's clearest SPSC demonstration. RX and TX deliberately split index ownership instead of placing a mutex around every ring operation. The implementation assumes the Cortex-M3 interrupt/thread execution model, aligned atomic index accesses, and volatile accesses to shared state. The short explicit critical sections are reserved for state that violates pure SPSC ownership: TXEIE enable coordination and take-and-clear counters.
 
-Keep those details below Service.
+On a port, re-check every assumption about:
 
-## 6. Changing TX/RX Pins
+- access width and alignment of shared variables;
+- interrupt priority/preemption;
+- whether an ISR and thread have single-writer ownership;
+- whether PRIMASK is still the desired critical-section mechanism;
+- whether DMA or peripheral hardware can overwrite memory while thread mode reads it;
+- whether a blocking/polling transaction still fits the cooperative-loop latency budget.
 
-Update BSP pin mapping and AFIO/remap support if required.
+A compiler-clean port is not proof of a correct handoff protocol.
 
-## 7. Porting to DMA UART
+## Validation order
 
-Keep upper API if possible.
+Recommended validation sequence:
 
-Replace byte-by-byte ISR movement with DMA ownership.
+```text
+1. source layer check
+2. compile + link + inspect map/size
+3. inspect generated disassembly around startup/ISR/critical paths
+4. OpenOCD connect + reset/halt
+5. verify clocks and GPIO modes in debugger
+6. validate the peripheral with a scope/logic analyzer/terminal as appropriate
+7. inject error/timeout/full-buffer conditions
+8. verify Application-observable counters/state
+```
 
-Define:
+If the target is still STM32F103C8T6 but only wiring changed, most failures should be diagnosable at BSP/config first. If the MCU changes, verify the platform/device model before debugging higher layers.
 
-- DMA channel;
-- RX circular semantics;
-- TX completion semantics;
-- overflow/backpressure behavior.
+## References
 
-## 8. Concurrency Validation
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
 
-Stress:
+---
 
-- ring wraparound;
-- full/empty transitions;
-- simultaneous producer/consumer activity;
-- debugger halt/resume;
-- high-rate RX.
-
-Verify no lost TX-start transition.
-
-## 9. Symbol Validation
-
-Inspect the ELF/map and verify the expected strong handler exists.
-
-If moving away from USART1, the new handler must replace the corresponding weak
-startup symbol.
-
-## 10. Common Pitfalls
-
-- wrong IRQ number;
-- wrong handler name;
-- wrong APB clock;
-- non-power-of-two ring size;
-- multiple producers on one ring;
-- leaving TXE interrupt always enabled;
-- blocking inside ISR;
-- ignoring overflow diagnostics.
+[← Architecture](architecture.md) · [↑ Example README](../README.md) · [05 Timer PWM →](../../05-timer-pwm/README.md)
