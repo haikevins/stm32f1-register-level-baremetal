@@ -1,6 +1,6 @@
 # STM32F1 Register-Level Examples
 
-> **Purpose:** eight independently buildable projects that reuse one architecture while progressively adding STM32F103 register-level mechanisms and increasingly demanding ISR/thread ownership patterns.
+> **Purpose:** nine independently buildable projects that reuse one architecture while progressively adding STM32F103 register-level mechanisms and increasingly demanding ISR/thread ownership patterns.
 
 [← Root README](../README.md) · [Project template](../template/README.md)
 
@@ -40,6 +40,7 @@ The numerical order is deliberate. A new example adds a concept while preserving
 | 06 | [I2C display](06-i2c-display/README.md) | I2C1 + SSD1306 | MCU bus transport composed under an external-device driver |
 | 07 | [SPI memory](07-spi-memory/README.md) | SPI1 + W25Q64 | command/status protocol, destructive erase/program semantics |
 | 08 | [ADC DMA](08-adc-dma/README.md) | TIM3 TRGO + ADC1 + DMA1 CH1 | autonomous sampled-data pipeline and stable block ownership |
+| 09 | [CAN Bus](09-can-bus/README.md) | bxCAN PB8/PB9 | two-node CAN: TX polling + RX FIFO0 IRQ |
 
 Each example has three documentation entry points:
 
@@ -140,6 +141,10 @@ SPI1 uses PA4..PA7, with software chip select and a requested ceiling of 5 MHz. 
 ### 08 - Autonomous ADC/DMA pipeline
 
 TIM3 update events trigger ADC1 channel 0 at 1 kHz. DMA1 Channel 1 fills a 64-sample circular buffer and signals half/full events. The BSP copies the completed 32-sample half in the ISR into stable storage. If thread mode has not consumed the prior block, an overrun counter is incremented and the newer block replaces it: the explicit policy is latest-block-wins. The service computes min/max/rounded average/millivolts, and Application applies 1800/1500 mV hysteresis to PC13.
+
+### 09 - CAN Bus with MCP2551
+
+Two STM32F103 Blue Pill nodes use bxCAN at 125 kbps with PB8/PB9 remap. Node TX sends standard ID 0x123 every 100 ms, Node RX handles FIFO0 interrupts and toggles PC13.
 
 ## Hardware and wiring summary
 

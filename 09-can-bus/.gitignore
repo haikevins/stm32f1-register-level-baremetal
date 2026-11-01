@@ -1,0 +1,5 @@
+# Generated firmware outputs and temporary local files
+/build/
+__pycache__/
+*.pyc
+*.bak
