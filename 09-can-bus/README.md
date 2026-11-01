@@ -1,8 +1,8 @@
-# 09 - CAN Bus - bxCAN TX/RX Between Two STM32F103 Nodes
+# 09 - CAN Bus - bxCAN TX/RX with MCP2551
 
-> A register-level STM32F103 bxCAN example using two Blue Pill boards and MCP2551 transceivers. One firmware tree builds into independent TX and RX nodes; it uses no HAL, LL, SPL, RTOS, or dynamic allocation.
+> **Scope:** bxCAN at 125 kbit/s on two STM32F103 nodes, PB8/PB9 remapping, exact standard-ID filtering, TX mailbox polling, RX FIFO0 interrupt handoff, and PC13 receive indication.
 
-[Examples index](../README.md) · [Architecture](docs/architecture.md) · [Porting guide](docs/porting_guide.md) · [Hardware validation](docs/hardware_validation.md)
+[Root](../../README.md) · [Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -20,263 +20,199 @@
 
 ## Purpose and expected behavior
 
-Example 09 introduces Classical CAN communication without a vendor peripheral library. Two STM32F103 nodes share a 125-kbit/s CAN bus through MCP2551 transceivers. The same source tree is compiled with `NODE=tx` for the transmitter or `NODE=rx` for the receiver.
+This example is stage 09 of the repository's progressive register-level series. It keeps the same self-managed startup, linker, layer checker, RCC fallback policy, system composition root, and super-loop used by the other projects, then changes the peripheral/dataflow problem under study.
 
-The expected behavior is deliberately observable:
+bxCAN at 125 kbit/s on two STM32F103 nodes, PB8/PB9 remapping, exact standard-ID filtering, TX mailbox polling, RX FIFO0 interrupt handoff, and PC13 receive indication.
 
-1. The **TX node** requests a standard 11-bit CAN data frame with identifier `0x123`, DLC 2, and bytes `[counter, 0x11]` every 100 ms. The 8-bit counter wraps from 255 to 0.
-2. The **RX node** accepts matching standard data frames through bxCAN filter bank 0 and FIFO0, then publishes the latest received frame from an interrupt to thread mode.
-3. The CAN service validates the frame and toggles the PC13 LED on each accepted frame. The application exposes transmit/receive counters for GDB inspection.
-
-A powered receiver does **not** send application data in this example. In normal CAN mode, its controller can still acknowledge valid frames on the bus. This distinction matters because CAN transmission success depends on acknowledgment from another active node.
+The important learning objective is not only “make the peripheral work.” The example is structured so that register knowledge remains concentrated in MCAL/platform code while Application expresses the observable behavior. Read the implementation from `system_init.c` downward and then compare the ownership discussion in [docs/architecture.md](docs/architecture.md).
 
 ## Hardware and wiring
 
-**Required setup:** two STM32F103 Blue Pill boards, two MCP2551 transceiver modules (with `VCC`, `GND`, `CTX`, `CRX`, `CANH`, `CANL`), a common ground, and 120-ohm termination at each physical end of the CAN bus. One ST-Link can be moved between boards for programming and debugging.
+```text
+Blue Pill TX            MCP2551 TX       MCP2551 RX            Blue Pill RX
+PB9 / CAN_TX ----------> CTX             CTX <---------------- PB9 / CAN_TX
+PB8 / CAN_RX <---------- CRX             CRX ----------------> PB8 / CAN_RX
+5 V -------------------- VCC             VCC ----------------- 5 V
+GND -------------------- GND ----------- GND ----------------- GND
 
-Wire **each** STM32 board to its own module:
+                       CANH ----------- CANH
+                       CANL ----------- CANL
+               120 ohms at each physical bus end
 
-| STM32F103 Blue Pill | MCP2551 module | Purpose |
-| --- | --- | --- |
-| PB9 | CTX | Remapped bxCAN transmit |
-| PB8 | CRX | Remapped bxCAN receive; verify module output voltage |
-| 5 V | VCC | Regulated 5-V transceiver supply |
-| GND | GND | Shared ground reference |
-| PC13 | Onboard LED | Receive indication on RX board |
+RX board PC13 onboard LED: toggle on a valid CAN frame.
+```
 
-Connect the two modules together:
-
-| Connection | Requirement |
-| --- | --- |
-| CANH ↔ CANH | High bus line |
-| CANL ↔ CANL | Low bus line |
-| GND ↔ GND | Common ground between both nodes |
-| CANH ↔ CANL at each bus end | One 120-ohm termination resistor per end, unless already fitted |
-
-With **all power disconnected**, two 120-ohm terminators in parallel should read approximately **60 ohms** between CANH and CANL. This checks the termination network, not whether frames are actually received. Do not fit extra termination if the modules already provide it.
-
-MCP2551 needs a regulated **5-V supply**, not the STM32 3.3-V output. Check each breakout board's decoupling and verify its `CRX` output is electrically compatible with PB8 under the STM32 datasheet conditions. Using PB8/PB9 for CAN avoids the PA11/PA12 USB D-/D+ pin conflict on Blue Pill boards powered by Micro USB.
+Use **one 120-ohm termination at each physical bus end**; with both nodes unpowered, the measured resistance across CANH/CANL was about 60 ohms. MCP2551 modules require a 5 V supply; verify the module's CRX electrical levels against the STM32 input limits. ST-Link SWD uses PA13/PA14 plus ground/reference.
 
 ## Configuration
 
-The TX and RX roles are selected **at build time** by `NODE`, rather than by changing source files.
+| Setting | Value |
+|---|---|
+| CAN instance / pins | CAN1, PB8 RX / PB9 TX (AFIO remap) |
+| nominal bit rate | 125 kbit/s |
+| APB1 clock | 36 MHz normal / 8 MHz fallback |
+| bit timing | 16 TQ, BS1=13, BS2=2, SJW=1 |
+| CAN prescaler | 18 normal / 4 fallback |
+| standard data frame | ID `0x123`, DLC 2, `[counter, 0x11]` |
+| TX schedule | 100 ms, 1 kHz SysTick |
+| RX path | filter bank 0, FIFO0, RX0 IRQ priority 2 |
+| TX mode | mailbox 0; NART and ABOM enabled |
+| build role | `NODE=tx` or `NODE=rx` |
+| common linker ceiling | 32 KiB Flash / 10 KiB RAM |
 
-| Item | Configuration |
-| --- | --- |
-| Target | STM32F103 (Cortex-M3), Blue Pill wiring |
-| `NODE=tx` | `APPLICATION_CAN_ROLE=1U` |
-| `NODE=rx` | `APPLICATION_CAN_ROLE=2U` |
-| CAN pins | PB8 = CAN_RX, PB9 = CAN_TX (AFIO remap) |
-| Nominal bit rate | 125 kbit/s |
-| Frame | Standard 11-bit data ID `0x123`, DLC 2 |
-| Payload | `[counter, 0x11]` |
-| TX interval | 100 ms, scheduled from a 1-ms SysTick time base |
-| CAN timing | 16 TQ, BS1 = 13, BS2 = 2, SJW = 1; sample point 87.5% |
-| Normal APB1 clock | 36 MHz; prescaler 18 |
-| HSI fallback APB1 clock | 8 MHz; prescaler 4 |
-| TX policy | Normal mode, NART enabled (no automatic retransmission), ABOM enabled |
-| RX filter | Bank 0, 32-bit mask, exact standard data ID `0x123`, FIFO0 |
-| RAM / Flash linker limits | 10 KiB RAM / 32 KiB Flash for both roles |
-| Initial main stack pointer | `0x20002800` |
+Configuration is deliberately split by ownership:
 
-The conservative memory limits support both the 32-KiB and 64-KiB STM32F1 devices used in hardware testing; they are intentionally smaller than the 64-KiB Flash / 20-KiB RAM settings in some earlier examples. CAN bit timing is derived from the active APB1 clock rather than assuming one fixed clock source.
+- `config/board_config.h` describes board/peripheral timing and physical integration policy;
+- `config/mcal_config.h` contains MCU-driver limits such as timeout counts, buffer sizes, or IRQ priority when appropriate;
+- `config/service_config.h` contains service-level capacity/policy;
+- `config/application_config.h` contains product/demo behavior.
+
+Compile-time checks reject several invalid combinations before register programming begins. These guards are part of the example contract and should be updated together with a port, not bypassed casually.
 
 ## Runtime flow
 
-Both roles use the repository's cooperative super-loop. Periodic work and application-level frame processing run in thread mode; receiving a CAN frame begins with a hardware interrupt.
-
-```text
-                           system_init()
-                                 |
-                       application_process()
-                                 |
-                    can_service_process()
-                         /             \
-          TX completion polling     RX mailbox consumption
-                   |                       |
-          100-ms timer due?          validate frame
-                   |                       |
-       submit ID 0x123 via TX0       count valid / invalid
-                   |                       |
-          bxCAN transmits                toggle PC13
-                   |
-         other CAN node ACKs
-
-CAN FIFO0 --> RX0 IRQ --> latest-frame mailbox --> thread-mode service
-SysTick --> 1-ms counter --> periodic TX scheduling
+```mermaid
+flowchart TB
+    TICK["SysTick<br/>1 ms"] --> TX["TX Application<br/>100 ms due?"]
+    TX -->|"yes"| MB["bxCAN TX mailbox 0<br/>ID 0x123"]
+    MB --> BUS["CANH / CANL<br/>125 kbit/s"]
+    BUS --> FIFO["RX filter 0<br/>FIFO0"]
+    FIFO --> IRQ["CAN1 RX0 IRQ<br/>latest-frame mailbox"]
+    IRQ --> SVC["CAN service<br/>validate ID / DLC / marker"]
+    SVC --> LED["Toggle PC13"]
 ```
 
-`can_service_send()` queues a frame to bxCAN TX mailbox 0 when it is available; `can_service_process()` polls for completion on subsequent iterations. The RX node has the same CAN peripheral initialization and receive interrupt, but application code does not schedule transmissions in `NODE=rx` mode.
+The TX node polls mailbox completion in thread mode, while RX0 ISR hands a frame to the service through a one-entry mailbox. The receiver acknowledges valid bus traffic in normal CAN mode but does not schedule application transmissions.
+
+The common boot path is still:
+
+```text
+Reset_Handler
+    -> runtime_init()
+        -> copy .data
+        -> zero .bss
+        -> main()
+            -> IRQ disabled
+            -> system_init()
+            -> IRQ enabled only after success
+            -> application_process() forever
+```
+
+Concrete examples use `cortex_m3_nop()` in `system_idle()` so the core remains running between super-loop iterations, which is convenient for the repository's expected ST-Link/debug setup.
 
 ## Register-level mechanism
 
-The implementation programs STM32F103 peripheral registers directly, with hardware access isolated below the application and service layers.
+### Clock, remap and bit timing
 
-| Peripheral / register group | Role in Example 09 |
-| --- | --- |
-| RCC APB2 / APB1 | Enable AFIO and CAN1 clocks; reset CAN1 before configuration |
-| AFIO MAPR | Remap CAN_RX/CAN_TX to PB8/PB9 |
-| GPIO configuration | PB8 floating input; PB9 alternate-function push-pull output |
-| CAN MCR / MSR | Enter/leave initialization mode with bounded waits; configure NART/ABOM |
-| CAN BTR | Set 125-kbit/s nominal bit timing from PCLK1 |
-| CAN FMR / filter bank 0 | Exact 11-bit ID and data-frame filtering to FIFO0 |
-| CAN IER / NVIC | Enable FIFO0 message-pending interrupt |
-| CAN TI0 registers / TSR | Submit a frame via transmit mailbox 0 and poll completion |
-| CAN RI0 registers / RF0R | Read received identifier, DLC and payload; release FIFO0 entry |
-| CAN ESR | Expose error status for inspection through GDB |
+MCAL enables AFIO and CAN1 clocks, maps CAN pins onto PB8/PB9, resets CAN1, then enters initialization mode through `MCR.INRQ` and a bounded wait for `MSR.INAK`. GPIO configures PB8 as input and PB9 as alternate-function push-pull. The CAN baud rate is derived from the **active** APB1 clock: `36 MHz / (18 * 16)` and `8 MHz / (4 * 16)` both give 125 kbit/s. BS1=13 and BS2=2 yield an 87.5% nominal sample point.
 
-The configured 16 time quanta and prescaler give `36 MHz / (18 × 16) = 125 kbit/s` on the normal APB1 clock path, or `8 MHz / (4 × 16) = 125 kbit/s` on the fallback path. The configuration is also covered by `tests/test_bit_timing.py`.
+### Acceptance filter and RX interrupt
 
-The receive interrupt `USB_LP_CAN1_RX0_IRQHandler` processes at most three hardware FIFO0 entries per invocation, keeping ISR work bounded. The application deliberately does not parse frames or toggle the LED inside the ISR.
+Filter bank 0 uses a 32-bit mask for standard data identifier `0x123` and routes accepted frames to FIFO0. The `USB_LP_CAN1_RX0_IRQHandler` handler removes up to three pending frames, releasing each FIFO entry and publishing the latest one into a static board mailbox. Frame validation and PC13 indication occur later in thread mode.
+
+### TX mailbox and completion
+
+`mcal_can_transmit()` validates the 11-bit ID and DLC, packs payload bytes into `TDLR`/`TDHR`, and requests transmission through mailbox 0. `mcal_can_poll_tx()` tests the request-complete and TXOK flags, then returns a completion or error state. Non-automatic retransmission (NART) is enabled, so missing acknowledgment can surface as a failed transmission rather than an unbounded retry.
+
+### Register ownership boundary
+
+The device model under `platform/device/stm32f103xb/` contains only the register structs, memory addresses, bit masks, and IRQ identities required by the example. MCAL performs reads/writes on that model. BSP binds MCAL capabilities to Blue Pill resources. ECUAL, where present, implements external-device protocol. Services and Application do not include raw STM32 register headers.
+
+This is a deliberate compromise between two bad extremes: hiding all registers behind a vendor framework, and scattering register writes throughout application code.
 
 ## Initialization and failure propagation
 
-Startup and memory initialization follow the common register-level example skeleton: vector table and reset handler establish the C runtime before `main()` calls `system_init()`.
+`system/system_init.c` is the composition root. Initialization is bottom-up: the board first establishes clocks/pins/peripherals, then services/ECUAL capabilities are initialized, then Application state is created. Any required lower-layer initialization returning false prevents the normal loop from starting.
 
-The initialization path is:
+Because `main()` disables interrupts before calling `system_init()`, an interrupt configured during board initialization does not execute until the entire initialization sequence succeeds and `main()` executes `cortex_m3_enable_irq()`. Code that needs a startup delay before that point must therefore use a mechanism independent of an interrupt tick unless it explicitly changes the contract.
 
-```text
-Reset_Handler --> .data/.bss runtime init --> main()
-    --> system_init()
-        --> board_init() (clock, GPIO, SysTick, CAN)
-        --> time_service_init()
-        --> indication_service_init()
-        --> can_service_init()
-        --> application_init()
-    --> application_process() / system_idle()
-```
-
-Board initialization returns failure when a required peripheral configuration step fails. bxCAN initialization includes bounded waits for initialization-mode acknowledgment. An unsuccessful `system_init()` follows the repository's panic path instead of silently continuing with an unusable CAN controller.
-
-Only after successful initialization does the normal super-loop process CAN events and periodic transmission. CAN transmission failures are observed through service counters rather than being treated as fatal startup errors.
+Initialization failure is fail-closed: `main()` calls `system_panic()`, which disables interrupts and remains in a NOP loop. This is intentionally simple and debugger-visible; it is not a production recovery manager.
 
 ## Concurrency and ownership
 
-The dependency direction matches the other register-level examples:
+SysTick advances the timebase asynchronously and CAN RX0 ISR publishes the newest frame into a single static mailbox. Thread mode uses a short PRIMASK-protected copy-and-clear operation to take ownership. If a newer frame replaces an unread one, a mailbox-overwrite counter increments; this is a **latest-frame-wins** design, not a lossless FIFO. TX scheduling, completion polling, frame checks, and LED toggling all run in thread mode.
 
-| Layer | Responsibility |
-| --- | --- |
-| `app/` | TX/RX demo policy, 100-ms scheduling and GDB-visible snapshots |
-| `services/` | CAN payload formation/validation, statistics, time and LED indication policy |
-| `bsp/bluepill/` | PB8/PB9 binding, CAN RX0 ISR and one-frame handoff mailbox |
-| `mcal/` | CAN, GPIO, NVIC, RCC, SysTick and interrupt-control primitives |
-| `platform/` | Cortex-M3 and STM32F103 register definitions |
-| `system/`, `startup/`, `linker/` | Composition, reset path, memory and main loop |
-
-RX interrupt context owns writes to a **single latest-frame mailbox**. Thread mode reads and clears it through `board_can_take_received()` using a short PRIMASK-protected critical section. If another frame arrives before the previous one is consumed, the mailbox is overwritten and an overrun counter increases. This is intentional for a learning example, **not** a lossless receive queue.
-
-Application and service statistics are updated in thread mode. The TX request/completion state is polled without a blocking send loop. SysTick supplies the 1-ms timing reference used to request a new TX frame approximately every 100 ms.
+For a deeper resource-by-resource ownership analysis, see [docs/architecture.md](docs/architecture.md).
 
 ## Observability and debugging
 
-The board's **PC13 LED** changes state after each frame that passes the application-level checks (ID, DLC and marker byte). GDB variables expose both roles' statistics:
+The project favors state that can be inspected directly in GDB without requiring a logging stack. Application-level `volatile` counters/status variables are used in examples where runtime observation is useful. The generated ELF also retains `-g3` debug information and the build emits a linker map and mixed source/disassembly listing.
 
-| TX node | RX node | Shared observation |
-| --- | --- | --- |
-| `application_can_tx_ok` | `application_can_rx_ok` | `application_can_esr` |
-| `application_can_tx_failed` | `application_can_rx_bad` | — |
-| `application_can_tx_busy` | `application_can_rx_overruns` | — |
-| — | `application_can_last_counter` | — |
+On TX, inspect `application_can_tx_ok`, `application_can_tx_failed`, and `application_can_tx_busy`. On RX, inspect `application_can_rx_ok`, `application_can_rx_bad`, `application_can_rx_overruns`, and `application_can_last_counter`. Both nodes expose `application_can_esr`; the RX board toggles PC13 on each valid frame.
 
-To inspect a running node, connect ST-Link to that board and run OpenOCD and GDB from two terminals:
+Typical debug path:
 
-```bash
-# Terminal 1 (from 09-can-bus/)
-make NODE=rx debug-server
-
-# Terminal 2 (after Terminal 1 starts)
-gdb-multiarch -q build/rx/firmware.elf
+```text
+ST-Link / SWD
+    |
+OpenOCD :3333
+    |
+GDB
+    |
+reset halt -> load -> break main -> continue
 ```
 
-Inside GDB:
+When debugging a peripheral, inspect from the architecture boundary outward:
 
-```gdb
-target extended-remote localhost:3333
-monitor reset halt
-continue
-```
+1. active system/bus clock;
+2. GPIO mode and peripheral clock enable;
+3. peripheral configuration registers;
+4. status/error flags;
+5. MCAL state/counters;
+6. service/Application state.
 
-Interrupt GDB with **Ctrl+C** after the board has been running, then inspect the appropriate role:
+This avoids treating an Application symptom as proof of an Application bug.
 
-```gdb
-# RX board
-p application_can_rx_ok
-p application_can_rx_bad
-p application_can_rx_overruns
-p application_can_last_counter
-p/x application_can_esr
-
-# TX board: connect ST-Link to TX and use build/tx/firmware.elf
-p application_can_tx_ok
-p application_can_tx_failed
-p application_can_tx_busy
-p/x application_can_esr
-```
-
-For the hardware-functional test performed **2026-11-01**, both boards were flashed and verified with ST-Link/OpenOCD. With both boards unpowered, the bus measured approximately 60 ohms across its two 120-ohm terminators. The following independent GDB snapshots were recorded:
-
-| Observation | Result |
-| --- | --- |
-| TX completed | `tx_ok = 160` |
-| TX failed / busy | `tx_failed = 0`, `tx_busy = 0` |
-| RX valid frames | `rx_ok = 86` |
-| RX invalid / overwritten mailbox | `rx_bad = 0`, `rx_overruns = 0` |
-| CAN ESR at inspection | `0x00000000` on each board |
-| RX indicator | PC13 blinking continuously |
-
-The TX and RX snapshots were collected in **different runs**; they cannot be subtracted to estimate loss rate. Full scope and caveats are recorded in [Hardware validation](docs/hardware_validation.md).
-
-When troubleshooting missing frames, first verify the regulated 5-V transceiver supplies, common ground, PB8/PB9 wiring and AFIO remap, CANH/CANL polarity and two correct terminations, then inspect CAN ESR and transmitter completion status.
+Hardware testing recorded TX success 160, RX valid 86, zero counted errors/overwrites and `ESR=0` at the respective snapshots. Those snapshots were **not simultaneous** and do not establish a packet-loss rate. See [hardware validation](docs/hardware_validation.md).
 
 ## Design trade-offs and limitations
 
-- **Small teaching scope:** standard 11-bit CAN data frames only; no extended frames, CANopen, ISO-TP or fragmentation.
-- **Latest-frame RX mailbox:** receive frames may be overwritten under load. `application_can_rx_overruns` describes mailbox overwrites, not every hardware FIFO overrun or every lost frame.
-- **Bounded ISR, cooperative service:** FIFO0 is drained at most three entries per ISR. Application validation and LED updates remain in thread mode.
-- **NART mode:** automatic retransmission is disabled. A missing ACK can produce a failed transmission; that fault scenario has not been validated on hardware here.
-- **Limited error telemetry:** the application exposes the sampled CAN ESR register and simple counters; it is not a complete CAN fault recovery or logging subsystem.
-- **Validated scope:** the hardware test demonstrated normal short-run TX/RX functionality, not zero frame loss, long-duration reliability, 10,000-frame stress results, or reset/bus-off recovery.
-- **Hardware assumptions:** MCP2551 needs 5 V, electrical compatibility of module RX output must be confirmed, and the two CAN ends must have appropriate termination.
-- **Memory model:** 32-KiB Flash / 10-KiB RAM allocation is intentional for the smaller tested device; it does not imply other STM32F103 variants have identical available memory.
+- The single latest-frame mailbox can overwrite an unread frame; its counter does not measure every possible hardware FIFO loss.
+- RX0 ISR handles a bounded number of FIFO entries; validation and LED updates are deferred to thread mode.
+- NART disables automatic retransmission, and bus-off/reset-recovery scenarios are outside the tested scope.
+- Only Classical CAN standard 11-bit data frames are demonstrated; there is no ISO-TP or CANopen protocol.
+- Hardware evidence covers short-run functional TX/RX, not a 10,000-frame endurance or zero-loss claim.
+- The linker intentionally caps both builds at 32 KiB Flash and 10 KiB RAM for the smaller tested board.
+
+These limitations are intentional study boundaries rather than hidden production claims. The example should be extended only after its current ownership and timing contracts are understood.
 
 ## Build and run
 
-Requirements: GNU Arm embedded toolchain (`arm-none-eabi-gcc`, binutils), GNU Make, Python 3, OpenOCD, ST-Link V2 and optionally `gdb-multiarch`.
-
-From the repository root:
+From this example directory, select the node role for each command:
 
 ```bash
-cd 09-can-bus
-
-# Build and validate both independent firmware roles
 make NODE=tx check-layers
 make NODE=tx
-make NODE=rx check-layers
-make NODE=rx
-
-# Optional bit-timing check
-python3 tests/test_bit_timing.py
-```
-
-Artifacts are in `build/tx/` and `build/rx/` (`firmware.elf`, `firmware.bin`, `firmware.hex`, listing and linker map). The Makefile uses GCC for Cortex-M3 and directly owned startup/linker scripts. Both roles include non-executable `.note.GNU-stack` metadata at assembly time; the GNU-stack warning present in the earlier baseline was resolved without changing either `.bin` image.
-
-Flash **one board at a time** when sharing one ST-Link. Keep the other node powered for the actual CAN communication test:
-
-```bash
-# ST-Link connected to TX board
+make NODE=tx size
 make NODE=tx flash
 
-# Move ST-Link to RX board
+# Move ST-Link to the RX board before flashing
+make NODE=rx check-layers
+make NODE=rx
+make NODE=rx size
 make NODE=rx flash
 ```
 
-Makefile targets follow the repository's standard vocabulary (`check-layers`, `clean`, `size`, `tree`, `flash`, `erase`, `debug-server`, `debug`), with the CAN-specific `NODE=tx`/`NODE=rx` selector. Use the corresponding role for all build/debug commands; the default `NODE` is `tx`.
+Debug with:
+
+```bash
+make NODE=rx debug-server
+# second terminal
+make NODE=rx debug
+```
+
+The Makefile builds freestanding Cortex-M3 Thumb code, links with the project linker script and `libgcc`, and emits ELF/BIN/HEX/LST/map artifacts. `make` runs the layer checker before compilation. The role-specific outputs are `build/tx/` and `build/rx/`; `python3 tests/test_bit_timing.py` checks nominal timing.
 
 ## References
 
-- STMicroelectronics, **RM0008** — STM32F1 reference manual (bxCAN, RCC, AFIO, NVIC and FIFO/mailbox registers).
-- STMicroelectronics, **PM0056** — STM32F10xxx Cortex-M3 programming manual.
-- Microchip, **MCP2551 datasheet** — physical layer, 5-V supply and transceiver electrical characteristics.
-- [Example 09 architecture notes](docs/architecture.md).
-- [Example 09 hardware validation](docs/hardware_validation.md).
-- [Example 09 porting guide](docs/porting_guide.md).
+- [STMicroelectronics — STM32F1 Series Documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f1-series/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 Reference Manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-stm32f105xx-and-stm32f107xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — STM32F103C8 Product Page](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c8.html)
+- [Arm — Cortex-M3 Devices Generic User Guide](https://developer.arm.com/documentation/dui0552/latest/)
+- [GNU Binutils — GNU linker documentation](https://sourceware.org/binutils/docs/ld/)
+- [OpenOCD User's Guide](https://openocd.org/doc/html/)
+- [Microchip — MCP2551 CAN Transceiver](https://www.microchip.com/en-us/product/mcp2551)
+
+---
+
+[← 08 ADC DMA](../08-adc-dma/README.md) · [↑ Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md) · [Project template →](../../template/README.md)
