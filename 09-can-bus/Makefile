@@ -29,10 +29,12 @@ CPPFLAGS := -Iapp/include -Iservices/include -Iecual/include \
     -Icommon/include -Iconfig -Isystem \
     -DAPPLICATION_CAN_ROLE=$(ROLE)
 CFLAGS := $(CPU_FLAGS) -std=c11 -Og -g3 -ffreestanding -fno-builtin \
+    -Wa,--noexecstack \
     -ffunction-sections -fdata-sections -fno-common \
     -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wundef \
     -Werror=implicit-function-declaration
-ASFLAGS := $(CPU_FLAGS) -x assembler-with-cpp -g3
+# Emit non-executable .note.GNU-stack metadata (do not hide linker warnings).
+ASFLAGS := $(CPU_FLAGS) -x assembler-with-cpp -g3 -Wa,--noexecstack
 LDFLAGS := $(CPU_FLAGS) -nostartfiles -nostdlib \
     -Tlinker/stm32f103c8t6.ld -Wl,--gc-sections -Wl,--build-id=none \
     -Wl,-Map=$(BUILD_DIR)/$(PROJECT).map

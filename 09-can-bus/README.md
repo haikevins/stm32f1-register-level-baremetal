@@ -1,4 +1,4 @@
-# 09 - bxCAN (STM32F103 Blue Pill + MCP2551 module)
+# 09 - bxCAN (STM32F103 Blue Pill + MCP2551)
 
 > Register-level CAN 2.0A Standard Data Frame demo; two Blue Pill nodes, one source tree, TX polling and RX0 interrupt. No HAL/LL/SPL, no heap.
 
@@ -16,9 +16,9 @@
 | CANL module 1 | CANL module 2 | bus low |
 | GND node 1 | GND node 2 | common ground |
 
-Place one 120 ohm resistor between CANH/CANL at **each bus end**, only if the module has no onboard termination. With both nodes unpowered, the measured bus termination should be about **60 ohms**. The user's previous 60-ohm measurement verifies termination only; it does **not** verify power, polarity or data communication.
+Place one 120 ohm resistor between CANH/CANL at **each bus end**, only if the module has no onboard termination. With both nodes unpowered, the measured bus termination should be about **60 ohms**. A 60-ohm bus measurement verifies termination only; it does **not** verify power, polarity or data communication.
 
-The pictured module may include decoupling. Verify VCC/GND at both modules (about 5 V) and check CRX output compatibility with PB8 before running. PB8 is a 5-V-tolerant digital pin under the device's specified conditions. If powering the Blue Pill from Micro USB, PB8/PB9 avoids the PA11/PA12 USB D-/D+ conflict. Do not power MCP2551 from the 3.3 V pin.
+Breakout modules may include decoupling; check the specific hardware. Verify VCC/GND at both modules (about 5 V) and check CRX output compatibility with PB8 before running. PB8 is a 5-V-tolerant digital pin under the device's specified conditions. If powering the Blue Pill from Micro USB, PB8/PB9 avoids the PA11/PA12 USB D-/D+ conflict. Do not power MCP2551 from the 3.3 V pin.
 
 ## Runtime
 
