@@ -207,4 +207,4 @@ The Makefile builds freestanding Cortex-M3 Thumb code, links with the project li
 
 ---
 
-[← 07 SPI memory](../07-spi-memory/README.md) · [↑ Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md) · [Project template →](../../template/README.md)
+[← 07 SPI memory](../07-spi-memory/README.md) · [↑ Examples](../README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md) · [09 CAN Bus →](../09-can-bus/README.md)
